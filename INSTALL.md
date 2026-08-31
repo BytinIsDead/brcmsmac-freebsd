@@ -197,7 +197,8 @@ Now `service netif restart` (or a reboot) brings up Wi-Fi by itself.
 | `kldload: File exists` | Module already loaded | `kldunload if_bcm4313` first. |
 | `kldload bhnd`: File exists | `bhnd` already loaded (or built in) | It's fine — go straight to loading the driver. |
 | `version mismatch` | Headers ≠ running kernel | Rebuild against the release-tag source matching `uname -U`. |
-| Driver loads but no interface | Didn't attach to the chip | `dmesg | tail` — check for SPROM/bus errors; confirm the chip is a BCM4313 (`pciconf -lv`). |
+| Driver loads but no interface | Didn't attach to the chip | `sysctl net.wlan.devices` — if it lists `bcm43130`, attach worked and you just need `ifconfig wlan0 create wlandev bcm43130`. If empty, `dmesg | tail` — check for SPROM/bus errors and that `bhnd` is loaded (`kldstat -m bhnd`). |
+| `ifconfig` shows nothing | The interface is simply down | Plain `ifconfig` hides down interfaces — use `ifconfig -a`. The base device is named `bcm43130` (from the module name), then `ifconfig wlan0 create wlandev bcm43130`. |
 | `ifconfig` has no `wlan` | `wlan(4)` not loaded | `kldload wlan` (and `bhnd`). |
 | Loads but Wi-Fi is flaky | Usually SPROM/tuning issues | Set `sysctl hw.bcm4313.debug=1` (needs a debug build) and collect `dmesg` output for a report. |
 | **No attach at all** | Chip isn't BCM4313 | If it's a BCM943142HM/BCM43142 (FullMAC), this softMAC driver can't drive it — see the note at the top. |
