@@ -203,8 +203,13 @@ Now `service netif restart` (or a reboot) brings up Wi-Fi by itself.
 | Loads but Wi-Fi is flaky | Usually SPROM/tuning issues | Set `sysctl hw.bcm4313.debug=1` (needs a debug build) and collect `dmesg` output for a report. |
 | **No attach at all** | Chip isn't BCM4313 | If it's a BCM943142HM/BCM43142 (FullMAC), this softMAC driver can't drive it — see the note at the top. |
 
-Still stuck? Gather `uname -a && uname -U`, `dmesg | tail -30`, and the
-`pciconf -lv` line for the card, and open an issue with those three things.
+Still stuck? Grab everything at once and paste it in your report:
+
+```sh
+kldstat -m if_bcm4313; kldstat -m bhnd; echo ---; \
+  sysctl net.wlan.devices; echo ---; dmesg | tail -40; echo ---; \
+  pciconf -lv | grep -iA5 broadcom; uname -a; uname -U
+```
 
 ## For developers
 
