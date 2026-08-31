@@ -87,17 +87,18 @@ for my $t (@tables) {
   print $out $blk, "\n";
 }
 
-# sw_ctrl phytbl wrappers (real, from the same file)
-my %sw = (
-  sw_ctrl_4313_plain   => ["dot11lcn_sw_ctrl_tbl_4313_rev0"],
-  sw_ctrl_4313_bt_ipa  => ["dot11lcn_sw_ctrl_tbl_4313_ipa_rev0_combo"],
-  sw_ctrl_4313_epa     => ["dot11lcn_sw_ctrl_tbl_4313_epa_rev0"],
-  sw_ctrl_4313_bt_epa  => ["dot11lcn_sw_ctrl_tbl_4313_epa_rev0_combo"],
-  sw_ctrl_4313_bt_epa_p250 => ["dot11lcn_sw_ctrl_tbl_4313_bt_epa_p250_rev0"],
+# sw_ctrl phytbl wrappers (real, from the same file).  Emitted in a fixed
+# order so regeneration is byte-identical.
+my @sw = (
+  [ "sw_ctrl_4313_plain",   "dot11lcn_sw_ctrl_tbl_4313_rev0" ],
+  [ "sw_ctrl_4313_epa",     "dot11lcn_sw_ctrl_tbl_4313_epa_rev0" ],
+  [ "sw_ctrl_4313_bt_ipa",  "dot11lcn_sw_ctrl_tbl_4313_ipa_rev0_combo" ],
+  [ "sw_ctrl_4313_bt_epa_p250", "dot11lcn_sw_ctrl_tbl_4313_bt_epa_p250_rev0" ],
+  [ "sw_ctrl_4313_bt_epa",  "dot11lcn_sw_ctrl_tbl_4313_epa_rev0_combo" ],
 );
 print $out "\n/* BCM4313 switch-control table descriptors (tbl 0x0f, 16-bit). */\n";
-for my $k (keys %sw) {
-  my ($arr) = @{$sw{$k}};
+for my $sw (@sw) {
+  my ($k, $arr) = @$sw;
   my $nm = "bcm4313_${k}_info";
   print $out "static const struct bcm4313_phytbl $nm = {\n";
   print $out "\t&$arr,\n\tnitems($arr), BCM4313_LCN_TBL_SW_CTRL, 0, 16\n};\n\n";

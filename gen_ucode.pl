@@ -22,6 +22,15 @@ sub carray {
 open my $o, ">", "bcm4313_ucode.c" or die $!;
 print $o <<'HDR';
 /*-
+ * SPDX-License-Identifier: BSD-2-Clause OR GPL-2.0-or-later
+ *
+ * EMBEDDED FIRMWARE (NOT dual-licensable): the byte arrays below are a
+ * Broadcom binary, licensed (not sold) under
+ * firmware/brcm/LICENCE.broadcom_bcm43xx.  Whatever software license you pick
+ * for the surrounding module, the firmware bytes stay under that Broadcom
+ * agreement: distribute them only unmodified and with that agreement;
+ * Broadcom retains title.  The wrapper code itself is dual BSD/GPL.
+ *
  * bcm4313_ucode.c -- BCM4313 D11/LCN microcode, embedded verbatim.
  *
  * The bytes come from the linux-firmware files:
@@ -46,8 +55,7 @@ print $o <<'HDR';
  */
 HDR
 my ($h, $hlen) = carray("bcm4313_ucode_hdr", "firmware/brcm/bcm43xx_hdr-0.fw", 12);
-print $o "static const struct { unsigned char hdr[12]; } __attribute__((packed)) x;\n";
-# just emit as a flat byte array, parsed into struct bcm4313_fw_hdr at runtime.
+# emitted as a flat byte array, parsed into struct bcm4313_fw_hdr at runtime.
 print $o $h;
 print $o "#define\tBCM4313_UCODE_HDR_SZ\t$hlen\n\n";
 my ($b, $blen) = carray("bcm4313_ucode_bin", "firmware/brcm/bcm43xx-0.fw", 12);

@@ -6,7 +6,7 @@
  * Broadcom-owned binary microcode.  See LICENSE before distributing.
  *
  * if_bcm4313var.h -- FreeBSD driver for the Broadcom BCM4313 SoftMAC
- * 802.11b/g/n PCIe chipset (D11 MAC core rev 17, LCN-PHY).
+ * 802.11b/g/n PCIe chipset (D11 MAC core rev 24, LCN-PHY).
  *
  * This is a native FreeBSD driver that glues the brcmsmac-derived hardware
  * programming directly into the bhnd(4) backplane bus, net80211, and
@@ -30,6 +30,7 @@
 #include <sys/malloc.h>
 #include <sys/mutex.h>
 #include <sys/rman.h>
+#include <sys/socket.h>
 #include <sys/taskqueue.h>
 #include <machine/bus.h>
 #include <machine/resource.h>
@@ -636,6 +637,7 @@ void bcm4313_lcnphy_set_chanspec(struct bcm4313_softc *, uint8_t);
 void bcm4313_lcnphy_calib_modes(struct bcm4313_softc *, uint32_t);
 void bcm4313_lcnphy_cal_init(struct bcm4313_softc *);
 void bcm4313_lcnphy_txpower_recalc_target(struct bcm4313_softc *);
+void bcm4313_lcnphy_txpwr_srom_read(struct bcm4313_softc *);
 /* Calibration modes (brcmsmac phy_hal.h). */
 #define	BCM4313_LCNPHY_PERICAL_WATCHDOG	2	/* PHY_PERICAL_WATCHDOG */
 #define	BCM4313_LCNPHY_PERICAL_PHYINIT	3	/* PHY_PERICAL_PHYINIT */

@@ -59,7 +59,6 @@ static void bcm4313_lcnphy_set_tx_pwr_npt(struct bcm4313_softc *, uint16_t);
 static void bcm4313_2064_vco_cal(struct bcm4313_softc *);
 static bool bcm4313_lcnphy_tempsense_done(struct bcm4313_softc *);
 static void bcm4313_lcnphy_tx_power_adjustment(struct bcm4313_softc *);
-static bool bcm4313_lcnphy_tpc_isenabled(struct bcm4313_softc *);
 static uint16_t bcm4313_lcnphy_get_tx_pwr_ctrl(struct bcm4313_softc *);
 static void bcm4313_lcnphy_set_tx_pwr_ctrl(struct bcm4313_softc *, uint16_t);
 void bcm4313_lcnphy_set_chanspec(struct bcm4313_softc *, uint8_t);
@@ -393,9 +392,9 @@ bcm4313_lcnphy_write_table(struct bcm4313_softc *sc,
 void
 bcm4313_lcnphy_read_table(struct bcm4313_softc *sc, struct bcm4313_phytbl *pt)
 {
-	uint8_t *p8 = (uint8_t *)pt->tbl_ptr;
-	uint16_t *p16 = (uint16_t *)pt->tbl_ptr;
-	uint32_t *p32 = (uint32_t *)pt->tbl_ptr;
+	uint8_t *p8 = (uint8_t *)(uintptr_t)pt->tbl_ptr;
+	uint16_t *p16 = (uint16_t *)(uintptr_t)pt->tbl_ptr;
+	uint32_t *p32 = (uint32_t *)(uintptr_t)pt->tbl_ptr;
 	uint32_t idx;
 
 	bcm4313_phy_write(sc, BCM4313_LCN_TBLADDR,
@@ -1025,18 +1024,6 @@ cleanup:
 	return (result);
 }
 
-/* wlc_lcnphy_measure_digital_power(). */
-static uint32_t
-bcm4313_lcnphy_measure_digital_power(struct bcm4313_softc *sc,
-    uint16_t nsamples)
-{
-	struct bcm4313_lcnphy_iq_est iq_est = { 0, 0, 0 };
-
-	if (!bcm4313_lcnphy_rx_iq_est(sc, nsamples, 32, &iq_est))
-		return (0);
-	return ((iq_est.i_pwr + iq_est.q_pwr) / nsamples);
-}
-
 /* wlc_lcnphy_rx_iq_cal_gain(). */
 static bool
 bcm4313_lcnphy_rx_iq_cal_gain(struct bcm4313_softc *sc, uint16_t biq1_gain,
@@ -1318,7 +1305,7 @@ bcm4313_lcnphy_txpower_recalc_target_internal(struct bcm4313_softc *sc)
 	struct bcm4313_phytbl tab;
 	uint32_t rate_table[BCM4313_NUM_RATES_CCK + BCM4313_NUM_RATES_OFDM +
 	    BCM4313_NUM_RATES_MCS_1_STREAM];
-	uint i, j;
+	u_int i, j;
 
 	if (sc->sc_temppwrctrl_capable)
 		return;
@@ -1788,22 +1775,6 @@ bcm4313_qm_log10(int32_t n, int16_t qn, int16_t *log10n, int16_t *qlog10n)
  * Channel-set path (phy_lcn.c).
  * ---------------------------------------------------------------------------
  */
-
-/* wlc_lcnphy_crsuprs(). */
-static void
-bcm4313_lcnphy_crsuprs(struct bcm4313_softc *sc)
-{
-	uint16_t cur_bits;
-
-	cur_bits = bcm4313_phy_read(sc, 0x413);
-	if (cur_bits & (0x1 << 15)) {
-		bcm4313_phy_maskset(sc, 0x413, (0x1 << 15), 0 << 15);
-		bcm4313_phy_maskset(sc, 0x411, (0x1 << 8), 1 << 8);
-		bcm4313_phy_maskset(sc, 0x412, (0x1 << 8), 1 << 8);
-	}
-
-	bcm4313_phy_maskset(sc, 0x413, (0x1 << 12), 0 << 12);
-}
 
 /* wlc_lcnphy_toggle_afe_pwdn(). */
 static void
@@ -3609,48 +3580,6 @@ bcm4313_lcnphy_clear_papd_comptable(struct bcm4313_softc *sc)
 	bcm4313_lcnphy_write_table(sc, &tab);
 }
 
-/* wlc_lcnphy_tempsense_new(). */
-static int16_t
-bcm4313_lcnphy_tempsense_new(struct bcm4313_softc *sc, bool mode)
-{
-	uint16_t tempsenseval1, tempsenseval2;
-	int16_t avg = 0;
-	bool suspend = false;
-
-	if (mode == 1) {
-		suspend = (0 == (bcm4313_read_4(sc, BCM4313_D11_MACCONTROL) &
-		    BCM4313_MCTL_EN_MAC));
-		if (!suspend)
-			bcm4313_lcnphy_suspend(sc);
-		bcm4313_lcnphy_vbat_temp_sense_setup(sc, BCM4313_LCN_TEMPSENSE_MODE);
-	}
-	tempsenseval1 = bcm4313_phy_read(sc, 0x476) & 0x1ff;
-	tempsenseval2 = bcm4313_phy_read(sc, 0x477) & 0x1ff;
-
-	if (tempsenseval1 > 255)
-		avg = (int16_t)(tempsenseval1 - 512);
-	else
-		avg = (int16_t)tempsenseval1;
-
-	if (tempsenseval2 > 255)
-		avg += (int16_t)(tempsenseval2 - 512);
-	else
-		avg += (int16_t)tempsenseval2;
-
-	avg /= 2;
-
-	if (mode == 1) {
-		bcm4313_phy_maskset(sc, 0x448, (0x1 << 14), (1) << 14);
-
-		DELAY(100);
-		bcm4313_phy_maskset(sc, 0x448, (0x1 << 14), (0) << 14);
-
-		if (!suspend)
-			bcm4313_mac_enable(sc);
-	}
-	return (avg);
-}
-
 /* wlc_lcnphy_tempsense(). */
 static uint16_t
 bcm4313_lcnphy_tempsense(struct bcm4313_softc *sc, bool mode)
@@ -3707,51 +3636,6 @@ bcm4313_lcnphy_tempsense(struct bcm4313_softc *sc, bool mode)
 			bcm4313_mac_enable(sc);
 	}
 	return ((uint16_t)avg);
-}
-
-/* wlc_lcnphy_tempsense_degree(). */
-static int8_t
-bcm4313_lcnphy_tempsense_degree(struct bcm4313_softc *sc, bool mode)
-{
-	int32_t degree = bcm4313_lcnphy_tempsense_new(sc, mode);
-
-	degree =
-	    ((degree << 10) + BCM4313_LCN_TEMPSENSE_OFFSET +
-	    (BCM4313_LCN_TEMPSENSE_DEN >> 1)) / BCM4313_LCN_TEMPSENSE_DEN;
-	return ((int8_t)degree);
-}
-
-/* wlc_lcnphy_vbatsense(). */
-static int8_t
-bcm4313_lcnphy_vbatsense(struct bcm4313_softc *sc, bool mode)
-{
-	uint16_t vbatsenseval;
-	int32_t avg = 0;
-	bool suspend = false;
-
-	if (mode == 1) {
-		suspend = (0 == (bcm4313_read_4(sc, BCM4313_D11_MACCONTROL) &
-		    BCM4313_MCTL_EN_MAC));
-		if (!suspend)
-			bcm4313_lcnphy_suspend(sc);
-		bcm4313_lcnphy_vbat_temp_sense_setup(sc, BCM4313_LCN_VBATSENSE_MODE);
-	}
-
-	vbatsenseval = bcm4313_phy_read(sc, 0x475) & 0x1ff;
-
-	if (vbatsenseval > 255)
-		avg = (int32_t)(vbatsenseval - 512);
-	else
-		avg = (int32_t)vbatsenseval;
-
-	avg = (avg * BCM4313_LCN_VBAT_SCALE_NOM +
-	    (BCM4313_LCN_VBAT_SCALE_DEN >> 1)) / BCM4313_LCN_VBAT_SCALE_DEN;
-
-	if (mode == 1) {
-		if (!suspend)
-			bcm4313_mac_enable(sc);
-	}
-	return ((int8_t)avg);
 }
 
 /* wlc_lcnphy_afe_clk_init(). */
@@ -3899,31 +3783,6 @@ bcm4313_lcnphy_calib_modes(struct bcm4313_softc *sc, uint32_t mode)
 	}
 }
 
-/* wlc_lcnphy_get_tssi(). */
-static void
-bcm4313_lcnphy_get_tssi(struct bcm4313_softc *sc, int8_t *ofdm_pwr,
-    int8_t *cck_pwr)
-{
-	int8_t cck_offset;
-	uint16_t status;
-
-	status = bcm4313_phy_read(sc, 0x4ab);
-	if (sc->sc_hwpwrctrl_capable && (status & (0x1 << 15))) {
-		*ofdm_pwr = (int8_t)(((bcm4313_phy_read(sc, 0x4ab) &
-		    (0x1ff << 0)) >> 0) >> 1);
-
-		if (bcm4313_lcnphy_tpc_isenabled(sc))
-			cck_offset = sc->sc_lcn.tx_power_offset[BCM4313_TXP_FIRST_CCK];
-		else
-			cck_offset = 0;
-
-		*cck_pwr = *ofdm_pwr + cck_offset;
-	} else {
-		*cck_pwr = 0;
-		*ofdm_pwr = 0;
-	}
-}
-
 /* wlc_lcnphy_tx_power_adjustment(). */
 static void
 bcm4313_lcnphy_tx_power_adjustment(struct bcm4313_softc *sc)
@@ -4045,7 +3904,7 @@ bcm4313_lcnphy_bu_tweaks(struct bcm4313_softc *sc)
 	bcm4313_phy_write(sc, 0x414, 0x1e10);
 	bcm4313_phy_write(sc, 0x415, 0x0640);
 
-	bcm4313_phy_maskset(sc, 0x4df, (0xff << 8), -9 << 8);
+	bcm4313_phy_maskset(sc, 0x4df, (0xff << 8), -(9 << 8));
 
 	bcm4313_phy_maskset(sc, 0x44a, 0xffff, bcm4313_phy_read(sc, 0x44a) | 0x44);
 	bcm4313_phy_write(sc, 0x44a, 0x80);
@@ -4475,7 +4334,7 @@ bcm4313_lcnphy_set_chanspec(struct bcm4313_softc *sc, uint8_t channel)
  * The raw SPROM values are read at attach into the softc (sc_txpa_2g,
  * sc_tx_power_min, sc_cck2gpo, ...); this derives the per-rate maxima and
  * fills the lcnphy state exactly as brcmsmac does. */
-static void
+void
 bcm4313_lcnphy_txpwr_srom_read(struct bcm4313_softc *sc)
 {
 	int8_t txpwr = 0;
@@ -4536,17 +4395,6 @@ bcm4313_lcnphy_txpwr_srom_read(struct bcm4313_softc *sc)
 	lcn->lcnphy_cck_dig_filt_type = -1;
 }
 
-/* wlc_phy_tpc_isenabled_lcnphy(). */
-static bool
-bcm4313_lcnphy_tpc_isenabled(struct bcm4313_softc *sc)
-{
-	if (sc->sc_temppwrctrl_capable)
-		return (false);
-	else
-		return (BCM4313_LCN_TX_PWR_CTRL_HW ==
-		    bcm4313_lcnphy_get_tx_pwr_ctrl(sc));
-}
-
 /* wlc_phy_txpower_recalc_target_lcnphy(). */
 void
 bcm4313_lcnphy_txpower_recalc_target(struct bcm4313_softc *sc)
@@ -4568,136 +4416,5 @@ void
 bcm4313_lcnphy_cal_init(struct bcm4313_softc *sc)
 {
 	(void)sc;
-}
-
-/* wlc_lcnphy_set_rx_gain(). */
-static void
-bcm4313_lcnphy_set_rx_gain(struct bcm4313_softc *sc, uint32_t gain)
-{
-	uint16_t trsw, ext_lna, lna1, lna2, tia, biq0, biq1, gain0_15, gain16_19;
-
-	trsw = (gain & ((uint32_t)1 << 28)) ? 0 : 1;
-	ext_lna = (uint16_t)(gain >> 29) & 0x01;
-	lna1 = (uint16_t)(gain >> 0) & 0x0f;
-	lna2 = (uint16_t)(gain >> 4) & 0x0f;
-	tia = (uint16_t)(gain >> 8) & 0xf;
-	biq0 = (uint16_t)(gain >> 12) & 0xf;
-	biq1 = (uint16_t)(gain >> 16) & 0xf;
-
-	gain0_15 = (uint16_t)((lna1 & 0x3) | ((lna1 & 0x3) << 2) |
-	    ((lna2 & 0x3) << 4) | ((lna2 & 0x3) << 6) |
-	    ((tia & 0xf) << 8) | ((biq0 & 0xf) << 12));
-	gain16_19 = biq1;
-
-	bcm4313_phy_maskset(sc, 0x44d, (0x1 << 0), trsw << 0);
-	bcm4313_phy_maskset(sc, 0x4b1, (0x1 << 9), ext_lna << 9);
-	bcm4313_phy_maskset(sc, 0x4b1, (0x1 << 10), ext_lna << 10);
-	bcm4313_phy_maskset(sc, 0x4b6, (0xffff << 0), gain0_15 << 0);
-	bcm4313_phy_maskset(sc, 0x4b7, (0xf << 0), gain16_19 << 0);
-
-	/* 4313 is 2.4GHz-only. */
-	bcm4313_phy_maskset(sc, 0x4b1, (0x3 << 11), lna1 << 11);
-	bcm4313_phy_maskset(sc, 0x4e6, (0x3 << 3), lna1 << 3);
-
-	bcm4313_lcnphy_rx_gain_override_enable(sc, true);
-}
-
-/* wlc_lcnphy_get_receive_power(). */
-static uint32_t
-bcm4313_lcnphy_get_receive_power(struct bcm4313_softc *sc, int32_t *gain_index)
-{
-	uint32_t received_power = 0;
-	int32_t max_index = 0;
-	uint32_t gain_code = 0;
-	struct bcm4313_lcnphy *lcn = &sc->sc_lcn;
-
-	max_index = 36;
-	if (*gain_index >= 0)
-		gain_code = lcnphy_23bitgaincode_table[*gain_index];
-
-	if (-1 == *gain_index) {
-		*gain_index = 0;
-		while ((*gain_index <= (int32_t)max_index) &&
-		    (received_power < 700)) {
-			bcm4313_lcnphy_set_rx_gain(sc,
-			    lcnphy_23bitgaincode_table[*gain_index]);
-			received_power =
-			    bcm4313_lcnphy_measure_digital_power(sc,
-			    lcn->lcnphy_noise_samples);
-			(*gain_index)++;
-		}
-		(*gain_index)--;
-	} else {
-		bcm4313_lcnphy_set_rx_gain(sc, gain_code);
-		received_power =
-		    bcm4313_lcnphy_measure_digital_power(sc,
-		    lcn->lcnphy_noise_samples);
-	}
-
-	return (received_power);
-}
-
-/* wlc_lcnphy_rx_signal_power(). */
-static int32_t
-bcm4313_lcnphy_rx_signal_power(struct bcm4313_softc *sc, int32_t gain_index)
-{
-	int32_t gain = 0;
-	int32_t nominal_power_db;
-	int32_t log_val, gain_mismatch, desired_gain, input_power_offset_db,
-	    input_power_db;
-	int32_t received_power, temperature;
-	uint32_t power;
-	uint32_t msb1, msb2, val1, val2, diff1, diff2;
-	struct bcm4313_lcnphy *lcn = &sc->sc_lcn;
-
-	received_power = bcm4313_lcnphy_get_receive_power(sc, &gain_index);
-
-	gain = lcnphy_gain_table[gain_index];
-
-	nominal_power_db = bcm4313_phy_read(sc, 0x425) >> 8;
-
-	power = (received_power * 16);
-	msb1 = ffs(power) - 1;
-	msb2 = msb1 + 1;
-	val1 = 1 << msb1;
-	val2 = 1 << msb2;
-	diff1 = (power - val1);
-	diff2 = (val2 - power);
-	if (diff1 < diff2)
-		log_val = msb1;
-	else
-		log_val = msb2;
-
-	log_val = log_val * 3;
-
-	gain_mismatch = (nominal_power_db / 2) - log_val;
-
-	desired_gain = gain + gain_mismatch;
-
-	input_power_offset_db = bcm4313_phy_read(sc, 0x434) & 0xff;
-
-	if (input_power_offset_db > 127)
-		input_power_offset_db -= 256;
-
-	input_power_db = input_power_offset_db - desired_gain;
-
-	input_power_db =
-	    input_power_db + lcnphy_gain_index_offset_for_rssi[gain_index];
-
-	temperature = lcn->lcnphy_lastsensed_temperature;
-
-	if ((temperature - 15) < -30)
-		input_power_db =
-		    input_power_db + (((temperature - 10 - 25) * 286) >> 12) - 7;
-	else if ((temperature - 15) < 4)
-		input_power_db =
-		    input_power_db + (((temperature - 10 - 25) * 286) >> 12) - 3;
-	else
-		input_power_db = input_power_db +
-		    (((temperature - 10 - 25) * 286) >> 12);
-
-	bcm4313_lcnphy_rx_gain_override_enable(sc, 0);
-
-	return (input_power_db);
 }
 

@@ -30,7 +30,14 @@ SRCS	+= device_if.h bus_if.h
 # The *_if.h headers above are generated from .m files with makeobjops.
 # In-tree module builds get the .m search path from __MPATH (kernel build
 # environment); add the paths here so out-of-tree builds work as well.
-.PATH.m:	${SYSDIR}/dev/bhnd ${SYSDIR}/dev/bhndb ${SYSDIR}/kern
+# The bhnd/bhndb .m files live in subdirectories (roots identified in both
+# FreeBSD 14 and 15); bus_if.m/device_if.m are under sys/kern.
+.PATH.m:	${SYSDIR}/dev/bhnd \
+		${SYSDIR}/dev/bhnd/bhndb \
+		${SYSDIR}/dev/bhnd/cores/chipc \
+		${SYSDIR}/dev/bhnd/cores/chipc/pwrctl \
+		${SYSDIR}/dev/bhnd/cores/pmu \
+		${SYSDIR}/kern
 
 # bhnd(4) headers include each other with quoted, directory-relative
 # includes; make sure the bhnd include dir is on the path.

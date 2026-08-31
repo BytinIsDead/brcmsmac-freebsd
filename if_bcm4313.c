@@ -23,9 +23,9 @@
  * D11 register map, dma64 engine and net80211 plumbing are complete and the
  * D11/LCN microcode is embedded (bcm4313_ucode.c) and uploaded at attach.
  * The real BCM4313 LCN-PHY tuning tables (switch-control + RX-gain) are
- * bundled verbatim in bcm4313_lcntab.h and selected from SPROM board flags.
- * The remaining LCN-PHY table sequence (full TX-power/iqlo calibration)
- * is kept by reference in brcmsmac/phy/phy_lcn.c.
+ * bundled verbatim in bcm4313_lcntab.h and selected from SPROM board flags;
+ * the full LCN-PHY TX-power/iqlo/tempsense calibration sequence is ported
+ * in if_bcm4313_phy_lcn.c (reference: brcmsmac/phy/phy_lcn.c).
  *
  * $FreeBSD$
  */
@@ -65,7 +65,6 @@
 
 #include <dev/bhnd/bhnd.h>
 #include <dev/bhnd/bhnd_ids.h>
-#include <dev/bhnd/bhnd_nvram.h>
 #include "bhnd_nvram_map.h"
 
 #include "if_bcm4313var.h"
@@ -266,9 +265,27 @@ bcm4313_radio_read32(struct bcm4313_softc *sc, uint16_t addr)
  * dma64 descriptor rings.
  * ---------------------------------------------------------------------------
  */
+/*
+ * bus_dmamap_load() completion callback (bus_dmamap_callback_t).
+ */
 static void
 bcm4313_dma_addr_cb(void *arg, bus_dma_segment_t *segs, int nsegs,
-    bus_size_t error)
+    int error)
+{
+	bus_addr_t *pa = arg;
+
+	KASSERT(error == 0 && nsegs == 1, ("%s: error=%u nsegs=%d\n",
+	    __func__, (unsigned)error, nsegs));
+	*pa = segs[0].ds_addr;
+}
+
+/*
+ * bus_dmamap_load_mbuf() completion callback (bus_dmamap_callback2_t;
+ * the extra arguments carry the map size and error status).
+ */
+static void
+bcm4313_dma_addr_cb2(void *arg, bus_dma_segment_t *segs, int nsegs,
+    bus_size_t mapsize, int error)
 {
 	bus_addr_t *pa = arg;
 
@@ -308,6 +325,7 @@ bcm4313_ring_alloc(struct bcm4313_softc *sc, struct bcm4313_ring *ring,
 		    error);
 		return (error);
 	}
+	/* bus_dmamem_alloc() returns the ring KVA directly. */
 	if ((error = bus_dmamem_alloc(ring->r_dtag, (void **)&ring->r_desc,
 	    BUS_DMA_NOWAIT, &ring->r_dmap)) != 0) {
 		device_printf(sc->sc_dev, "%s: dmamem_alloc: %d\n", __func__,
@@ -316,21 +334,12 @@ bcm4313_ring_alloc(struct bcm4313_softc *sc, struct bcm4313_ring *ring,
 		ring->r_dtag = NULL;
 		return (error);
 	}
-	if ((error = bus_dmamem_map(ring->r_dtag, ring->r_desc, ringsize,
-	    &ring->r_dmap, BUS_DMA_NOWAIT, (void **)&ring->r_desc)) != 0) {
-		bus_dmamem_free(ring->r_dtag, ring->r_desc, ring->r_dmap);
-		bus_dma_tag_destroy(ring->r_dtag);
-		ring->r_dtag = NULL;
-		ring->r_desc = NULL;
-		return (error);
-	}
 	memset(ring->r_desc, 0, ringsize);
 
 	/* Get the physical address of the descriptor ring. */
 	if ((error = bus_dmamap_load(ring->r_dtag, ring->r_dmap, ring->r_desc,
 	    ringsize, bcm4313_dma_addr_cb, &ring->r_paddr,
 	    BUS_DMA_NOWAIT)) != 0) {
-		bus_dmamem_unmap(ring->r_dtag, ring->r_desc, ring->r_dmap);
 		bus_dmamem_free(ring->r_dtag, ring->r_desc, ring->r_dmap);
 		bus_dma_tag_destroy(ring->r_dtag);
 		ring->r_dtag = NULL;
@@ -345,7 +354,7 @@ bcm4313_ring_alloc(struct bcm4313_softc *sc, struct bcm4313_ring *ring,
 		goto fail;
 	}
 	for (i = 0; i < nslots; i++) {
-		if ((error = bus_dmamap_create(sc->sc_bufdtag, NULL, NULL,
+		if ((error = bus_dmamap_create(sc->sc_bufdtag, 0,
 		    &ring->r_slots[i].s_dmap)) != 0)
 			goto fail;
 	}
@@ -423,8 +432,6 @@ bcm4313_ring_free(struct bcm4313_ring *ring)
 		ring->r_txhdr = NULL;
 	}
 	if (ring->r_desc != NULL) {
-		bus_dmamem_unmap(ring->r_dtag, ring->r_desc,
-		    ring->r_nslots * sizeof(struct bcm4313_dma64desc));
 		bus_dmamem_free(ring->r_dtag, ring->r_desc, ring->r_dmap);
 		ring->r_desc = NULL;
 	}
@@ -521,13 +528,13 @@ bcm4313_rx_refill(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 	n = ring->r_nslots - 1 - active;
 	for (i = 0; i < n; i++) {
 		slot = &ring->r_slots[ring->r_out];
-		m = m_getcl(m, M_NOWAIT, MT_DATA, M_PKTHDR);
+		m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
 		if (m == NULL) {
 			sc->sc_rxnobuf++;
 			break;
 		}
 		if ((error = bus_dmamap_load_mbuf(sc->sc_bufdtag,
-		    slot->s_dmap, m, bcm4313_dma_addr_cb, &pa,
+		    slot->s_dmap, m, bcm4313_dma_addr_cb2, &pa,
 		    BUS_DMA_NOWAIT)) != 0) {
 			m_freem(m);
 			sc->sc_rxnobuf++;
@@ -600,6 +607,8 @@ static void
 bcm4313_rx_harvest(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
+	struct ieee80211_frame *wh;
+	struct ieee80211_node *ni;
 	struct bcm4313_d11rxhdr *rxh;
 	struct bcm4313_slot *slot;
 	struct mbuf *m;
@@ -643,7 +652,22 @@ bcm4313_rx_harvest(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 			 * wlc_lcnphy_rx_signal_strength().
 			 */
 			rssi = -(int)((rxs2 & BCM4313_PRXS2_HTPHY_RXPWR_ANT0) >> 8);
-			ieee80211_input(ic, m, NULL, rssi, -95);
+			/*
+			 * Deliver to net80211 without the softc lock held:
+			 * ieee80211_input() may call back into the driver
+			 * (parent, newstate, transmit) which takes the same
+			 * mutex (the bwn(4) pattern).
+			 */
+			wh = mtod(m, struct ieee80211_frame *);
+			BCM4313_UNLOCK(sc);
+			ni = ieee80211_find_rxnode(ic,
+			    (const struct ieee80211_frame_min *)wh);
+			if (ni != NULL) {
+				ieee80211_input(ni, m, rssi, -95);
+				ieee80211_free_node(ni);
+			} else
+				ieee80211_input_all(ic, m, rssi, -95);
+			BCM4313_LOCK(sc);
 		}
 next:
 		ring->r_in = (ring->r_in + 1) % ring->r_nslots;
@@ -659,7 +683,9 @@ next:
 static void
 bcm4313_txstatus_harvest(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 {
+#ifdef BCM4313_DEBUG
 	struct bcm4313_tx_status *ts;
+#endif
 	struct bcm4313_slot *slot;
 	struct mbuf *m;
 	uint32_t hw;
@@ -676,6 +702,7 @@ bcm4313_txstatus_harvest(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 			bus_dmamap_sync(sc->sc_bufdtag, slot->s_dmap,
 			    BUS_DMASYNC_POSTREAD);
 			bus_dmamap_unload(sc->sc_bufdtag, slot->s_dmap);
+			#ifdef BCM4313_DEBUG
 			if (m->m_len >= BCM4313_TXSTATUS_LEN) {
 				ts = mtod(m, struct bcm4313_tx_status *);
 				BCM4313_DPRINTF(sc,
@@ -683,6 +710,7 @@ bcm4313_txstatus_harvest(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 				    le16toh(ts->frameid),
 				    le16toh(ts->status));
 			}
+			#endif
 			m_freem(m);
 		}
 		ring->r_in = (ring->r_in + 1) % ring->r_nslots;
@@ -738,18 +766,29 @@ bcm4313_set_txhdr(struct bcm4313_softc *sc, struct ieee80211_node *ni,
 	txh->PhyTxControlWord = htole16(BCM4313_PHY_TXC_LCNPHY_ANT_LAST);
 	if (IEEE80211_IS_CHAN_HT(ic->ic_curchan)) {
 		/* HT: 1x1, 20MHz, MCS in MainRates. */
+#if __FreeBSD_version >= 1500000
+		/* ni_txrate is now struct ieee80211_node_txrate. */
+		rate = min(ni->ni_txrate.mcs, 15);
+#else
 		rate = min(ni->ni_txrate, 15);
+#endif
 		txh->MainRates = htole16(rate);
 		txh->PhyTxControlWord_1 = htole16(BCM4313_PHY_TXC1_BW_20MHZ |
 		    (BCM4313_PHY_TXC1_MODE_SISO <<
 		    BCM4313_PHY_TXC1_MODE_SHIFT));
 	} else {
 		/* Legacy: PLCP rate code in MainRates. */
+#if __FreeBSD_version >= 1500000
+		/* dot11rate already carries the dot11 rate code. */
+		txh->MainRates = htole16(bcm4313_plcp_rate(
+		    ni->ni_txrate.dot11rate));
+#else
 		rate = ni->ni_txrate;
 		if (rate >= ic->ic_rt->rateCount)
 			rate = 0;
 		txh->MainRates = htole16(bcm4313_plcp_rate(
-		    ic->ic_rt->info[rate].rate));
+		    ic->ic_rt->info[rate].dot11Rate));
+#endif
 	}
 }
 
@@ -901,32 +940,10 @@ bcm4313_start_locked(struct bcm4313_softc *sc)
 	}
 }
 
-#if __FreeBSD_version >= 1500000
 /*
- * FreeBSD 15: ic_transmit passes the destination node explicitly.
- */
-static int
-bcm4313_transmit(struct ieee80211com *ic, struct ieee80211_node *ni,
-    struct mbuf *m)
-{
-	struct bcm4313_softc *sc = ic->ic_softc;
-	int error;
-
-	error = 0;
-	BCM4313_LOCK(sc);
-	if ((sc->sc_flags & BCM4313_FLAG_RUNNING) == 0) {
-		BCM4313_UNLOCK(sc);
-		return (ENXIO);
-	}
-	error = mbufq_enqueue(&sc->sc_snd, m);
-	if (error == 0)
-		bcm4313_start_locked(sc);
-	BCM4313_UNLOCK(sc);
-	return (error);
-}
-#else
-/*
- * FreeBSD 14 and earlier: the node is attached to the mbuf (rcvif).
+ * net80211 delivers the destination node attached to the mbuf
+ * (m_pkthdr.rcvif) on both FreeBSD 14 and 15; ic_transmit stays
+ * (ic, m) on both.
  */
 static int
 bcm4313_transmit(struct ieee80211com *ic, struct mbuf *m)
@@ -946,7 +963,6 @@ bcm4313_transmit(struct ieee80211com *ic, struct mbuf *m)
 	BCM4313_UNLOCK(sc);
 	return (error);
 }
-#endif
 
 /* Raw frame transmit (management frames, monitor mode). */
 static int
@@ -1211,13 +1227,17 @@ bcm4313_getradiocaps(struct ieee80211com *ic, int maxchans, int *nchans,
 static void
 bcm4313_scan_start(struct ieee80211com *ic)
 {
-	BCM4313_DPRINTF(ic->ic_softc, "scan start\n");
+	struct bcm4313_softc *sc __unused = ic->ic_softc;
+
+	BCM4313_DPRINTF(sc, "scan start\n");
 }
 
 static void
 bcm4313_scan_end(struct ieee80211com *ic)
 {
-	BCM4313_DPRINTF(ic->ic_softc, "scan end\n");
+	struct bcm4313_softc *sc __unused = ic->ic_softc;
+
+	BCM4313_DPRINTF(sc, "scan end\n");
 }
 
 static void
@@ -1551,7 +1571,7 @@ fail:
  */
 static const struct bhnd_device bcm4313_devices[] = {
 	{ { BHND_MATCH_CORE(BHND_MFGID_BCM, BHND_COREID_D11),
-	    BHND_MATCH_CORE_REV(BCM4313_D11_HWREV) },
+	    BHND_MATCH_CORE_REV(HWREV_EQ(BCM4313_D11_HWREV)) },
 	    BCM4313_DEVICE_DESC, NULL, 0 },
 	BHND_DEVICE_END
 };
@@ -1704,16 +1724,22 @@ bcm4313_attach(device_t dev)
 	sc->sc_lcn.lcnphy_rssi_gs_hightemp = sc->sc_lcn.lcnphy_rssi_gs;
 
 	/* Tempsense / IQ-cal calibration. */
-	(void)bhnd_nvram_getvar_uint16(dev, BHND_NVAR_RAWTSENSENSE,
+	(void)bhnd_nvram_getvar_uint16(dev, BHND_NVAR_RAWTEMPSENSE,
 	    &sc->sc_lcn.lcnphy_rawtempsense);
 	(void)bhnd_nvram_getvar_uint8(dev, BHND_NVAR_MEASPOWER,
 	    &sc->sc_lcn.lcnphy_measPower);
 	(void)bhnd_nvram_getvar_uint8(dev, BHND_NVAR_TEMPSENSE_SLOPE,
 	    &sc->sc_lcn.lcnphy_tempsense_slope);
-	(void)bhnd_nvram_getvar_uint8(dev, BHND_NVAR_HW_IQCAL_EN,
-	    &sc->sc_lcn.lcnphy_hw_iqcal_en);
-	(void)bhnd_nvram_getvar_uint8(dev, BHND_NVAR_IQCAL_SWP_DIS,
-	    &sc->sc_lcn.lcnphy_iqcal_swp_dis);
+	{
+		uint8_t tmp8;
+
+		(void)bhnd_nvram_getvar_uint8(dev, BHND_NVAR_HW_IQCAL_EN,
+		    &tmp8);
+		sc->sc_lcn.lcnphy_hw_iqcal_en = (tmp8 != 0);
+		(void)bhnd_nvram_getvar_uint8(dev, BHND_NVAR_IQCAL_SWP_DIS,
+		    &tmp8);
+		sc->sc_lcn.lcnphy_iqcal_swp_dis = (tmp8 != 0);
+	}
 	(void)bhnd_nvram_getvar_uint8(dev, BHND_NVAR_TEMPCORRX,
 	    &sc->sc_lcn.lcnphy_tempcorrx);
 	(void)bhnd_nvram_getvar_uint8(dev, BHND_NVAR_TEMPSENSE_OPTION,
@@ -1730,6 +1756,13 @@ bcm4313_attach(device_t dev)
 	    &sc->sc_mcs2gpo[0]);
 	(void)bhnd_nvram_getvar_uint16(dev, BHND_NVAR_MCS2GPO1,
 	    &sc->sc_mcs2gpo[1]);
+
+	/*
+	 * Derive the per-rate TX power maxima and rate offsets from the
+	 * SPROM values read above (brcmsmac calls
+	 * wlc_phy_txpwr_srom_read_lcnphy() from wlc_phy_attach_lcnphy()).
+	 */
+	bcm4313_lcnphy_txpwr_srom_read(sc);
 
 	/*
 	 * Hardware TX-power control capability (wlc_phy_attach_lcnphy):
@@ -1785,11 +1818,11 @@ bcm4313_attach(device_t dev)
 	    IEEE80211_C_SHPREAMBLE | IEEE80211_C_SHSLOT |
 	    IEEE80211_C_WME | IEEE80211_C_WPA;
 	ic->ic_htcaps = IEEE80211_HTCAP_SHORTGI20;
-	ic->ic_sup_mcs[0] = 0xff;	/* MCS 0-7 (1x1) */
 	ic->ic_rxstream = 1;
 	ic->ic_txstream = 1;
-	ic->ic_modecaps = (1 << IEEE80211_MODE_11B) |
-	    (1 << IEEE80211_MODE_11G) | (1 << IEEE80211_MODE_11NG);
+	setbit(ic->ic_modecaps, IEEE80211_MODE_11B);
+	setbit(ic->ic_modecaps, IEEE80211_MODE_11G);
+	setbit(ic->ic_modecaps, IEEE80211_MODE_11NG);
 	ic->ic_flags_ext |= IEEE80211_FEXT_SWBMISS;
 
 	/* SPROM MAC address (bhnd nvram layer). */
@@ -1918,7 +1951,7 @@ static driver_t bcm4313_driver = {
 	.size = sizeof(struct bcm4313_softc),
 };
 
-DRIVER_MODULE(if_bcm4313, bhnd, bcm4313_driver, bcm4313_devclass, NULL, NULL);
+DRIVER_MODULE(if_bcm4313, bhnd, bcm4313_driver, 0, 0);
 MODULE_VERSION(if_bcm4313, 1);
 MODULE_DEPEND(if_bcm4313, bhnd, 1, 1, 1);
 MODULE_DEPEND(if_bcm4313, wlan, 1, 1, 1);
