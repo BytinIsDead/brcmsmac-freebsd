@@ -1,58 +1,95 @@
-# if_bcm4313(4) — BCM4313 driver installation tutorial
+# Getting your BCM4313 Wi-Fi working on FreeBSD
 
-A native FreeBSD SoftMAC 802.11b/g/n driver for the Broadcom **BCM4313** PCIe
-chipset (D11 MAC core rev 24, LCN-PHY). It is a port of the Linux `brcmsmac`
-driver, wired into `bhnd(4)` and net80211.
+A friendly, step-by-step guide to building and loading **if_bcm4313**, the
+FreeBSD driver for the Broadcom **BCM4313** Wi-Fi chip.
 
-The driver is **self-contained**: the D11/LCN microcode and all LCN-PHY tuning
-tables are embedded, so **no firmware files** need to be loaded separately.
+**What you're really doing:** taking the driver source in this folder,
+compiling it into a kernel module (a `.ko` file), and telling FreeBSD to load
+it, so the operating system can talk to your Wi-Fi chip and you can connect
+to a network. Three jobs: **build → load → connect**.
 
----
-
-## 1. What you need
-
-- A FreeBSD machine. The code is verified against **FreeBSD 14.2**, **15.1-RELEASE**
-  and **main** (amd64).
-- Kernel **source** at `/usr/src/sys`. Check it exists:
-  ```sh
-  ls /usr/src/sys/sys/param.h
-  ```
-  If `/usr/src` is missing or `/usr/src/sys` is empty, install the source
-tree. On a release, use "Install source" in `bsdinstall` (or let `freebsd-update`
-pull the matching source with `freebsd-update fetch`), or clone the exact
-**release tag** for the version you run — not the `releng/` branch:
-  ```sh
-  git clone --depth 1 --branch release/15.1.0 https://github.com/freebsd/freebsd-src.git /usr/src
-  uname -U   # __FreeBSD_version of your running kernel, e.g. 1501000 = 15.1-RELEASE
-  ```
-  > Use the `release/<major.minor.0>` tag matching your installed release.
-  > `releng/15.1` is the *branch* that keeps receiving HEAD commits after the
-  > release; it does **not** match a shipped 15.1-RELEASE kernel. Check out the
-  > release tag (or the source that `freebsd-update` provides) so the headers
-  > match your running kernel and avoid version mismatches.
-- A working compiler/toolchain. A stock FreeBSD release already ships `cc`,
-  `make`, `bmake` and the kernel build glue under `/usr/src/sys — no extra
-  packages are needed for a kernel module build.
-
-**You must build on a real FreeBSD host.** This is a kernel driver for actual
-BCM4313 hardware; it cannot be built or loaded in a non-FreeBSD environment.
+> **Quick check first — is your chip a BCM4313?**
+> Run `pciconf -lv | grep -A3 14e4` (Broadcom's vendor id is `14e4`). If you
+> see **`BCM4313`**, this guide is for you.
+>
+> **Not a BCM4313?** This driver only speaks to the *softMAC* BCM4313 (and
+> 43224/43225). If your card is a **BCM943142HM / BCM43142**, that's a
+> *FullMAC* chip (Linux drives it with `brcmfmac` + proprietary firmware) —
+> **this driver will not attach to it.** FreeBSD doesn't ship a FullMAC
+> Broadcom driver, so that hardware needs a separate port.
 
 ---
 
-## 2. Build the module
+## The 30-second version
 
-From this repository directory:
+If you already have FreeBSD installed with kernel source, this is all of it:
+
+```sh
+make SYSDIR=/usr/src/sys clean depend all   # build -> if_bcm4313.ko
+kldload bhnd                                # bus the chip sits on
+kldload wlan                                # wireless stack
+kldload ./if_bcm4313.ko                     # our driver
+dmesg | grep -i bcm4313                     # did it attach?
+ifconfig wlan0 create wlandev <iface>       # make a wireless interface
+ifconfig wlan0 scan                         # see networks?
+```
+
+Everything below is the same thing, explained slowly.
+
+---
+
+## Step 1 — What you need
+
+| Requirement | How to check it | What if it's missing |
+|---|---|---|
+| A FreeBSD machine (14.x or 15.x) | `uname -r` | Install FreeBSD first. |
+| Kernel source in `/usr/src/sys` | `ls /usr/src/sys/sys/param.h` | See Step 2. |
+| A compiler (comes with FreeBSD) | `cc --version` | Nothing to do — stock FreeBSD ships one. |
+
+You must do this on a **real FreeBSD machine** (or VM). Kernel drivers can't
+be built or tested on Linux/macOS — they compile against FreeBSD kernel
+headers and load only into a FreeBSD kernel.
+
+## Step 2 — Get the kernel source (if `/usr/src` is empty)
+
+The driver needs FreeBSD's kernel headers to build against. Two easy ways:
+
+**Way A — let FreeBSD give you the matching source** (recommended):
+
+```sh
+sudo freebsd-update fetch
+```
+
+then, during install, choose *Install source*. Or use `bsdinstall`'s "Install
+source" option on a fresh system. Either way `/usr/src` now matches your
+kernel exactly.
+
+**Way B — clone the exact release tag** (for power users):
+
+```sh
+uname -U    # prints something like 1501000  (= 15.1-RELEASE)
+git clone --depth 1 --branch release/15.1.0 https://github.com/freebsd/freebsd-src.git /usr/src
+```
+
+> **Why "release tag" and not `releng/15.1`?** `releng/15.1` is the
+> *development branch* — it keeps changing after the release ships, so its
+> headers don't match your installed 15.1-RELEASE kernel. The `release/15.1.0`
+> tag is the actual release. Mismatched headers = `version mismatch` when you
+> load the module (see Step 6).
+
+## Step 3 — Build the driver
+
+From this folder (the one with the `Makefile`):
 
 ```sh
 make SYSDIR=/usr/src/sys clean depend all
 ```
 
-This produces **`if_bcm4313.ko`** in the current directory.
+You should see compiler output and end with a file called **`if_bcm4313.ko`**
+appearing in this folder.
 
-### If your kernel used a custom config (`KERNCONF`)
-
-A custom kernel generates `opt_*.h` files (in `/usr/obj/usr/src/<arch>.amd64/sys/<KERNCONF>`)
-that net80211 expects to find. Build against that directory too:
+**Custom kernel?** If you built your FreeBSD kernel from a custom config, add
+`KERNBUILDDIR=` pointing at its build directory:
 
 ```sh
 make SYSDIR=/usr/src/sys \
@@ -60,139 +97,117 @@ make SYSDIR=/usr/src/sys \
     clean depend all
 ```
 
-Substitute `amd64.amd64/sys/GENERIC` with your actual `uname -mp` architecture
-and kernel config name if different.
+(Change `amd64.amd64/sys/GENERIC` to your architecture and kernel name —
+`uname -mp` shows the architecture part.)
 
-### What the build does
+## Step 4 — Load the driver
 
-`bsd.kmod.mk` turns the `.m` interface files under `sys/dev/bhnd`, `sys/dev/bhnd/...`
-and `sys/kern/` into `*_if.h` (and `bhnd_nvram_map.h`) using `makeobjops`, then
-compiles:
-
-| file | purpose |
-|------|---------|
-| `if_bcm4313.c` | attach/init, DMA rings, net80211 plumbing, microcode upload |
-| `if_bcm4313_phy_lcn.c` | full LCN-PHY programming & calibration |
-| `bcm4313_ucode.c` | embedded D11/LCN microcode (from `firmware/brcm/`) |
-
----
-
-## 3. Install / load
-
-Copy the module into the kernel module tree (optional, for `kldload if_bcm4313`):
+The chip lives on the `bhnd(4)` backplane bus, and the Wi-Fi logic needs the
+`wlan(4)` stack. Load those first, then the driver:
 
 ```sh
-make SYSDIR=/usr/src/sys install
-```
-
-or load it directly from the build directory:
-
-```sh
-# make sure the bus it lives on is present (bhnd for the backplane,
-# wlan for net80211). Load them first if they're not already.
-kldstat -m bhnd || kldload bhnd
+kldstat -m bhnd || kldload bhnd      # skip if already loaded
 kldstat -m wlan || kldload wlan
-
-kldload ./if_bcm4313.ko        # or: kldload if_bcm4313 after install
+kldload ./if_bcm4313.ko              # load from this folder
 ```
 
-### Verify it attached
+**Did it work?** Check:
 
 ```sh
-dmesg | grep -i bcm4313
-kldstat -m if_bcm4313
-ifconfig -v
+kldstat -m if_bcm4313                # is the module in memory?
+dmesg | tail -20                     # recent kernel messages
 ```
 
-You should see the driver claim the D11 core and register an interface. The
-interface name is the one shown by `ifconfig -v` (net80211 will present it as a
-base VAP such as `wlan0` once created, or the driver may register one directly).
+You want to see the driver *attaching* — e.g. a line mentioning
+`bcm4313` and the D11 core. Then look at your network interfaces:
 
-> A `version mismatch` error means headers don't match the running kernel —
-> rebuild against your exact release (`uname -a` + your `/usr/src` rev).
+```sh
+ifconfig
+```
 
----
+The driver registers an interface (a name like `wlan0` after Step 5, or a
+base interface before it).
 
-## 4. Use Wi-Fi
+> **Got `version mismatch`?** Your headers don't match your running kernel.
+> Go back to Step 2, get the *matching* source, rebuild, and `kldunload`
+> the old module first.
 
-### Create a wlan device (if not already present)
+## Step 5 — Connect to Wi-Fi
+
+**1. Create a wireless interface** over the driver's base interface
+(`<base_if>` is whatever the driver registered, e.g. `wlan0` if it's already
+the device name, or the name `ifconfig` showed):
 
 ```sh
 ifconfig wlan0 create wlandev <base_if>
 ```
-`<base_if>` is the interface the driver registered (see step 3).
 
-### Scan for networks
+**2. Scan for networks** — sanity check that the radio works:
 
 ```sh
 ifconfig wlan0 scan
 ```
 
-### Connect (open / WPA2 via wpa_supplicant)
+You should see a list of nearby network names (SSIDs).
 
-Edit `/etc/wpa_supplicant.conf`:
+**3. Join a network (WPA2)**. Create `/etc/wpa_supplicant.conf`:
 
 ```
 network={
     ssid="MyNetwork"
-    psk="my-passphrase"
+    psk="my-password"
 }
 ```
 
-Then:
+then run:
 
 ```sh
 wpa_supplicant -B -i wlan0 -c /etc/wpa_supplicant.conf
 dhclient wlan0
 ```
 
-Persist it for boot by setting these in `/etc/rc.conf`:
+**4. Make it automatic at boot** — add to `/etc/rc.conf`:
 
 ```
 wlans_wlan0="wlan0"
 ifconfig_wlan0="WPA DHCP"
 ```
 
-and adding your network block to `/etc/wpa_supplicant.conf` (or pointing
-`ifconfig_wlan0`'s WPA config at it).
+Now `service netif restart` (or a reboot) brings up Wi-Fi by itself.
 
----
+## Step 6 — Common problems, explained plainly
 
-## 5. Troubleshooting
+| You see... | What it means | What to do |
+|---|---|---|
+| `kldload: File exists` | Module already loaded | `kldunload if_bcm4313` first. |
+| `version mismatch` | Headers ≠ running kernel | Rebuild against the release-tag source matching `uname -U`. |
+| Driver loads but no interface | Didn't attach to the chip | `dmesg | tail` — check for SPROM/bus errors; confirm the chip is a BCM4313 (`pciconf -lv`). |
+| `ifconfig` has no `wlan` | `wlan(4)` not loaded | `kldload wlan` (and `bhnd`). |
+| Loads but Wi-Fi is flaky | Usually SPROM/tuning issues | Set `sysctl hw.bcm4313.debug=1` (needs a debug build) and collect `dmesg` output for a report. |
+| **No attach at all** | Chip isn't BCM4313 | If it's a BCM943142HM/BCM43142 (FullMAC), this softMAC driver can't drive it — see the note at the top. |
 
-| Symptom | Fix |
-|---------|-----|
-| `kldload`: no such file | Enter the build dir / install first (step 3). |
-| `version mismatch` | Rebuild with the kernel source matching your running release. |
-| driver doesn't attach | Confirm hardware is a BCM4313 (`pciconf -lv`); check `dmesg` for bus errors. |
-| `ifconfig` shows no `wlan` | Ensure `wlan` and `bhnd` are loaded (`kldload wlan bhnd`). |
-| weak/no signal | RF tuning tables are loaded from SPROM board flags automatically at attach — check `dmesg` warnings about missing SPROM values. |
+Still stuck? Gather `uname -a && uname -U`, `dmesg | tail -30`, and the
+`pciconf -lv` line for the card, and open an issue with those three things.
 
-Enable driver debug (built-in):
+## For developers
 
-```sh
-sysctl hw.bcm4313.debug=1
-```
+- **Enable debug prints:** compile with `-DBCM4313_DEBUG` (or uncomment
+  `#define BCM4313_DEBUG 1` in `opt_bcm4313.h`), then
+  `sysctl hw.bcm4313.debug=1`.
+- **Regenerate the embedded tables/microcode** from the bundled sources:
 
----
+  ```sh
+  perl gen_lcntab.pl                 # -> bcm4313_lcntab.h
+  perl gen_phytbl.pl > bcm4313_phytbl_lcn.h
+  perl gen_ucode.pl                  # -> bcm4313_ucode.c/.h
+  ```
 
-## 6. Reproducing the embedded artifacts (for developers)
+- **No firmware files needed** — the D11/LCN microcode and RF tables are
+  compiled into the module. That's why there's no `/boot/modules/<fw>` step.
 
-The checked-in generated files (`bcm4313_ucode.c/.h`, `bcm4313_lcntab.h`,
-`bcm4313_phytbl_lcn.h`) are produced byte-for-byte from the bundled reference
-sources. Regenerate them from this directory:
+## More docs
 
-```sh
-perl gen_lcntab.pl       # -> bcm4313_lcntab.h      (from brcmsmac/phy/phytbl_lcn.c)
-perl gen_phytbl.pl > bcm4313_phytbl_lcn.h   # -> bcm4313_phytbl_lcn.h
-perl gen_ucode.pl        # -> bcm4313_ucode.c/.h   (from firmware/brcm/*.fw)
-```
-
----
-
-## 7. References
-
-- FreeBSD kernel module build: `man 9 kmod`, `man 9 driver`
-- Wireless framework: `man 4 wlan`, `man 4 wpa_supplicant` (or `man 8`)
-- Upstream reference driver: Linux `brcmsmac` (bundled under `brcmsmac/` for reference)
-- FreeBSD `bhnd(4)` backplane: `man 4 bhnd`
+- [`README.md`](README.md) — what the driver is and how it's put together
+- [`COMPATIBILITY.md`](COMPATIBILITY.md) — FreeBSD version support matrix
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — how the port maps to Linux `brcmsmac`
+- [`TESTING.md`](TESTING.md) — what's verified, and the hardware test deck
