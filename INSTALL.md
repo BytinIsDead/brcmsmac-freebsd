@@ -111,19 +111,33 @@ is for 15.1):
 You only need to `kldload wlan` on a custom kernel that left it out.
 
 **`bhnd` — loadable module, ships with the base system.** It is *not* in
-GENERIC; the module files (`bhnd.ko`, plus `bcma`/`siba`/`bhndb`/`bhndb_pci`
-which it pulls in automatically) are already in `/boot/kernel/`. Load it
-now, then load the driver:
+GENERIC. A PCIe chip like the BCM4313 also needs the **PCI→bhnd bridge
+chain** (`bhndb_pci` → `bhndb` → `bcma_bhndb`) before the D11 core is even
+visible. Loading just `kldload bhnd` alone is *not* enough — the bridge
+modules are separate.
+
+The driver now declares dependencies on the whole chain, so loading the
+driver alone pulls everything in:
 
 ```sh
-kldload bhnd                         # loads bcma/bhndb/etc. automatically
-kldload ./if_bcm4313.ko              # load from this folder
+kldload ./if_bcm4313.ko   # auto-loads bhnd, bhndb, bhndb_pci, bcma_bhndb, bhnd_sprom
 ```
 
-To also load `bhnd` at every boot, add this line to `/boot/loader.conf`:
+If your build predates that fix (or `kldload` complains about a missing
+module), load the chain explicitly first:
+
+```sh
+kldload bhnd bhndb bhndb_pci bcma_bhndb bhnd_sprom
+kldload ./if_bcm4313.ko
+```
+
+To load everything at every boot, add to `/boot/loader.conf`:
 
 ```
 bhnd_load="YES"
+bhndb_load="YES"
+bhndb_pci_load="YES"
+bcma_bhndb_load="YES"
 ```
 
 **Did it work?** Check:

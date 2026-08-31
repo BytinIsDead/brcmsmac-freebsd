@@ -7,11 +7,15 @@ uname -a
 uname -U
 echo
 echo "===== kernel modules present on disk ====="
-ls -l /boot/kernel/bhnd.ko /boot/kernel/bhndb.ko 2>&1
+# NOTE: bhnd_sprom is compiled INTO bhnd.ko (no separate .ko file).
+for m in bhnd bhndb bhndb_pci bcma_bhndb; do
+    ls -l /boot/kernel/$m.ko 2>&1
+done
 echo
 echo "===== loaded modules ====="
-kldstat -m bhnd 2>&1
-kldstat -m if_bcm4313 2>&1
+for m in bhnd bhndb bhndb_pci bcma_bhndb if_bcm4313; do
+    kldstat -m $m 2>&1
+done
 echo
 echo "===== built driver present in this dir? ====="
 pwd

@@ -1954,4 +1954,16 @@ static driver_t bcm4313_driver = {
 DRIVER_MODULE(if_bcm4313, bhnd, bcm4313_driver, 0, 0);
 MODULE_VERSION(if_bcm4313, 1);
 MODULE_DEPEND(if_bcm4313, bhnd, 1, 1, 1);
+/*
+ * bhnd(4) is only the bus core.  A PCIe-attached BCM4313 also needs the
+ * PCI->bhnd bridge chain before the D11 core is even enumerated (the same
+ * set bwn_pci declares): bhndb_pci -> bhndb -> bcma_bhndb (bcma backend
+ * over the bridge), plus bhnd_sprom for nvram.  Without these, kldload
+ * succeeds but the card never becomes a bhnd bus and the driver never
+ * probes -- kldload if_bcm4313 must pull them in automatically.
+ */
+MODULE_DEPEND(if_bcm4313, bhndb, 1, 1, 1);
+MODULE_DEPEND(if_bcm4313, bhndb_pci, 1, 1, 1);
+MODULE_DEPEND(if_bcm4313, bcma_bhndb, 1, 1, 1);
+MODULE_DEPEND(if_bcm4313, bhnd_sprom, 1, 1, 1);
 MODULE_DEPEND(if_bcm4313, wlan, 1, 1, 1);
