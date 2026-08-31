@@ -18,15 +18,18 @@ tables are embedded, so **no firmware files** need to be loaded separately.
   ls /usr/src/sys/sys/param.h
   ```
   If `/usr/src` is missing or `/usr/src/sys` is empty, install the source
-tree. On a release, use "Install source" in `bsdinstall`, `freebsd-update`
-will have pulled it with `freebsd-update fetch` (it includes source), or
-clone just the tree you run:
+tree. On a release, use "Install source" in `bsdinstall` (or let `freebsd-update`
+pull the matching source with `freebsd-update fetch`), or clone the exact
+**release tag** for the version you run — not the `releng/` branch:
   ```sh
-  git clone --depth 1 --branch releng/15.1 https://github.com/freebsd/freebsd-src.git /usr/src
-  uname -r # tells you which releng/<X.Y> branch to use (e.g. releng/15.1)
+  git clone --depth 1 --branch release/15.1.0 https://github.com/freebsd/freebsd-src.git /usr/src
+  uname -U   # __FreeBSD_version of your running kernel, e.g. 1501000 = 15.1-RELEASE
   ```
-  > Use the `releng/<X.Y>` branch matching your installed release, and keep the
-tree at the same revision as your running kernel to avoid version mismatches.
+  > Use the `release/<major.minor.0>` tag matching your installed release.
+  > `releng/15.1` is the *branch* that keeps receiving HEAD commits after the
+  > release; it does **not** match a shipped 15.1-RELEASE kernel. Check out the
+  > release tag (or the source that `freebsd-update` provides) so the headers
+  > match your running kernel and avoid version mismatches.
 - A working compiler/toolchain. A stock FreeBSD release already ships `cc`,
   `make`, `bmake` and the kernel build glue under `/usr/src/sys — no extra
   packages are needed for a kernel module build.
