@@ -38,7 +38,7 @@ struct bcm4313_phytbl {
 #define	BCM4313_LCN_TBL_SAMPLEPLAY	0x15
 #define	BCM4313_LCN_TBL_SAMPLEPLAY1	0x16
 
-const uint16_t dot11lcn_sw_ctrl_tbl_4313_epa_rev0_combo[] = {
+static const uint16_t dot11lcn_sw_ctrl_tbl_4313_epa_rev0_combo[] = {
 	0x0007,
 	0x0005,
 	0x0006,
@@ -105,7 +105,7 @@ const uint16_t dot11lcn_sw_ctrl_tbl_4313_epa_rev0_combo[] = {
 	0x000a,
 
 };
-const uint16_t dot11lcn_sw_ctrl_tbl_4313_bt_epa_p250_rev0[] = {
+static const uint16_t dot11lcn_sw_ctrl_tbl_4313_bt_epa_p250_rev0[] = {
 	0x0007,
 	0x0005,
 	0x0002,
@@ -171,7 +171,7 @@ const uint16_t dot11lcn_sw_ctrl_tbl_4313_bt_epa_p250_rev0[] = {
 	0x0002,
 	0x0002,
 };
-const uint16_t dot11lcn_sw_ctrl_tbl_4313_epa_rev0[] = {
+static const uint16_t dot11lcn_sw_ctrl_tbl_4313_epa_rev0[] = {
 	0x0002,
 	0x0008,
 	0x0004,
@@ -237,7 +237,7 @@ const uint16_t dot11lcn_sw_ctrl_tbl_4313_epa_rev0[] = {
 	0x0004,
 	0x0001,
 };
-const uint16_t dot11lcn_sw_ctrl_tbl_4313_rev0[] = {
+static const uint16_t dot11lcn_sw_ctrl_tbl_4313_rev0[] = {
 	0x000a,
 	0x0009,
 	0x0006,
@@ -303,7 +303,7 @@ const uint16_t dot11lcn_sw_ctrl_tbl_4313_rev0[] = {
 	0x0006,
 	0x0005,
 };
-const uint16_t dot11lcn_sw_ctrl_tbl_4313_ipa_rev0_combo[] = {
+static const uint16_t dot11lcn_sw_ctrl_tbl_4313_ipa_rev0_combo[] = {
 	0x0005,
 	0x0006,
 	0x0009,
@@ -369,7 +369,7 @@ const uint16_t dot11lcn_sw_ctrl_tbl_4313_ipa_rev0_combo[] = {
 	0x0009,
 	0x000a,
 };
-const uint32_t dot11lcn_gain_tbl_2G[] = {
+static const uint32_t dot11lcn_gain_tbl_2G[] = {
 	0x00000000,
 	0x00000004,
 	0x00000008,
@@ -467,7 +467,7 @@ const uint32_t dot11lcn_gain_tbl_2G[] = {
 	0x00000000,
 	0x00000000
 };
-const uint16_t dot11lcn_aux_gain_idx_tbl_2G[] = {
+static const uint16_t dot11lcn_aux_gain_idx_tbl_2G[] = {
 	0x0000,
 	0x0000,
 	0x0000,
@@ -507,7 +507,7 @@ const uint16_t dot11lcn_aux_gain_idx_tbl_2G[] = {
 	0x029a,
 	0x0000
 };
-const uint32_t dot11lcn_gain_idx_tbl_2G[] = {
+static const uint32_t dot11lcn_gain_idx_tbl_2G[] = {
 	0x00000000,
 	0x00000000,
 	0x00000000,
@@ -661,7 +661,7 @@ const uint32_t dot11lcn_gain_idx_tbl_2G[] = {
 	0x00000000,
 	0x00000000
 };
-const uint8_t dot11lcn_gain_val_tbl_2G[] = {
+static const uint8_t dot11lcn_gain_val_tbl_2G[] = {
 	0xfc,
 	0x02,
 	0x08,
@@ -731,7 +731,7 @@ const uint8_t dot11lcn_gain_val_tbl_2G[] = {
 	0x00,
 	0x00
 };
-const uint32_t dot11lcn_gain_tbl_extlna_2G[] = {
+static const uint32_t dot11lcn_gain_tbl_extlna_2G[] = {
 	0x00000000,
 	0x00000004,
 	0x00000008,
@@ -829,7 +829,7 @@ const uint32_t dot11lcn_gain_tbl_extlna_2G[] = {
 	0x00000000,
 	0x00000000
 };
-const uint16_t dot11lcn_aux_gain_idx_tbl_extlna_2G[] = {
+static const uint16_t dot11lcn_aux_gain_idx_tbl_extlna_2G[] = {
 	0x0400,
 	0x0400,
 	0x0400,
@@ -869,7 +869,7 @@ const uint16_t dot11lcn_aux_gain_idx_tbl_extlna_2G[] = {
 	0x0693,
 	0x0000
 };
-const uint32_t dot11lcn_gain_idx_tbl_extlna_2G[] = {
+static const uint32_t dot11lcn_gain_idx_tbl_extlna_2G[] = {
 	0x00000000,
 	0x00000040,
 	0x00000000,
@@ -1023,7 +1023,7 @@ const uint32_t dot11lcn_gain_idx_tbl_extlna_2G[] = {
 	0x00000000,
 	0x00000000
 };
-const uint8_t dot11lcn_gain_val_tbl_extlna_2G[] = {
+static const uint8_t dot11lcn_gain_val_tbl_extlna_2G[] = {
 	0xfc,
 	0x02,
 	0x08,
@@ -1093,7 +1093,7 @@ const uint8_t dot11lcn_gain_val_tbl_extlna_2G[] = {
 	0x00,
 	0x00
 };
-const uint32_t dot11lcn_gain_tbl_rev0[] = {
+static const uint32_t dot11lcn_gain_tbl_rev0[] = {
 	0x00000000,
 	0x00000000,
 	0x00000000,
@@ -1191,7 +1191,7 @@ const uint32_t dot11lcn_gain_tbl_rev0[] = {
 	0x00000000,
 	0x00000000,
 };
-const uint16_t dot11lcn_aux_gain_idx_tbl_rev0[] = {
+static const uint16_t dot11lcn_aux_gain_idx_tbl_rev0[] = {
 	0x0401,
 	0x0402,
 	0x0403,
@@ -1231,7 +1231,7 @@ const uint16_t dot11lcn_aux_gain_idx_tbl_rev0[] = {
 	0x01a5,
 	0x0000,
 };
-const uint32_t dot11lcn_gain_idx_tbl_rev0[] = {
+static const uint32_t dot11lcn_gain_idx_tbl_rev0[] = {
 	0x00000000,
 	0x00000000,
 	0x10000000,
@@ -1381,7 +1381,7 @@ const uint32_t dot11lcn_gain_idx_tbl_rev0[] = {
 	0x90000000,
 	0x0000001c,
 };
-const uint8_t dot11lcn_gain_val_tbl_rev0[] = {
+static const uint8_t dot11lcn_gain_val_tbl_rev0[] = {
 	0x09,
 	0x0f,
 	0x14,

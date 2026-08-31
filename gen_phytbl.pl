@@ -113,8 +113,10 @@ sub extract_table {
         }
         die "unbalanced braces for $name\n" if $depth != 0;
         my $decl = substr($text, $start, $i - $start + 1);
-        # strip the leading "static "
-        $decl =~ s/^static\s+//;
+        # Keep the leading "static const".  This header is included by more
+        # than one translation unit, so non-static definitions would collide
+        # as duplicate global symbols at link time; static gives each TU a
+        # private copy.
         # strip trailing whitespace / comments that ride along
         $decl =~ s/\s+$//;
         return $decl . "\n";

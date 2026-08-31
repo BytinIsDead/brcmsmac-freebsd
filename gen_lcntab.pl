@@ -82,8 +82,10 @@ HDR
 for my $t (@tables) {
   my $blk = extract($t);
   $blk =~ s/\bu(8|16|32)\b/uint$1_t/g;
-  # make non-static so calibration can reference them from if_bcm4313.c
-  $blk =~ s/^static const /const /;
+  # Keep them `static const`: this header is pulled in by more than one
+  # module (bcm4313_lcntab.h -> bcm4313_phytbl_lcn.h), so non-static
+  # definitions would collide as duplicate global symbols at link time.
+  # Each translation unit that needs a table gets its own private copy.
   print $out $blk, "\n";
 }
 

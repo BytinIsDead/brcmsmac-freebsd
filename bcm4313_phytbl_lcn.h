@@ -389,7 +389,7 @@ typedef uint16_t iqcal_gain_params_lcnphy[9];
 #define	LCNPHY_NUM_TX_DIG_FILTERS_CCK	13
 #define	LCNPHY_NUM_TX_DIG_FILTERS_OFDM	3
 
-const uint16_t dot11lcn_min_sig_sq_tbl_rev0[] = {
+static const uint16_t dot11lcn_min_sig_sq_tbl_rev0[] = {
 	0x014d,
 	0x014d,
 	0x014d,
@@ -456,7 +456,7 @@ const uint16_t dot11lcn_min_sig_sq_tbl_rev0[] = {
 	0x014d,
 };
 
-const uint16_t dot11lcn_noise_scale_tbl_rev0[] = {
+static const uint16_t dot11lcn_noise_scale_tbl_rev0[] = {
 	0x0000,
 	0x0000,
 	0x0000,
@@ -523,7 +523,7 @@ const uint16_t dot11lcn_noise_scale_tbl_rev0[] = {
 	0x0000,
 };
 
-const uint32_t dot11lcn_fltr_ctrl_tbl_rev0[] = {
+static const uint32_t dot11lcn_fltr_ctrl_tbl_rev0[] = {
 	0x000141f8,
 	0x000021f8,
 	0x000021fb,
@@ -536,7 +536,7 @@ const uint32_t dot11lcn_fltr_ctrl_tbl_rev0[] = {
 	0x0000024b,
 };
 
-const uint32_t dot11lcn_ps_ctrl_tbl_rev0[] = {
+static const uint32_t dot11lcn_ps_ctrl_tbl_rev0[] = {
 	0x00100001,
 	0x00200010,
 	0x00300001,
@@ -559,7 +559,7 @@ const uint32_t dot11lcn_ps_ctrl_tbl_rev0[] = {
 	0x00600f22,
 };
 
-const uint16_t dot11lcn_sw_ctrl_tbl_rev0[] = {
+static const uint16_t dot11lcn_sw_ctrl_tbl_rev0[] = {
 	0x0004,
 	0x0004,
 	0x0002,
@@ -626,7 +626,7 @@ const uint16_t dot11lcn_sw_ctrl_tbl_rev0[] = {
 	0x0002,
 };
 
-const uint8_t dot11lcn_nf_table_rev0[] = {
+static const uint8_t dot11lcn_nf_table_rev0[] = {
 	0x5f,
 	0x36,
 	0x29,
@@ -645,7 +645,7 @@ const uint8_t dot11lcn_nf_table_rev0[] = {
 	0x1f,
 };
 
-const uint8_t dot11lcn_spur_tbl_rev0[] = {
+static const uint8_t dot11lcn_spur_tbl_rev0[] = {
 	0x01,
 	0x01,
 	0x01,
@@ -776,7 +776,7 @@ const uint8_t dot11lcn_spur_tbl_rev0[] = {
 	0x01,
 };
 
-const uint16_t dot11lcn_unsup_mcs_tbl_rev0[] = {
+static const uint16_t dot11lcn_unsup_mcs_tbl_rev0[] = {
 	0x001a,
 	0x0034,
 	0x004e,
@@ -933,7 +933,7 @@ const uint16_t dot11lcn_unsup_mcs_tbl_rev0[] = {
 	0x06f6,
 };
 
-const uint16_t dot11lcn_iq_local_tbl_rev0[] = {
+static const uint16_t dot11lcn_iq_local_tbl_rev0[] = {
 	0x0200,
 	0x0300,
 	0x0400,
@@ -1044,7 +1044,7 @@ const uint16_t dot11lcn_iq_local_tbl_rev0[] = {
 	0x0000,
 };
 
-const uint32_t dot11lcn_papd_compdelta_tbl_rev0[] = {
+static const uint32_t dot11lcn_papd_compdelta_tbl_rev0[] = {
 	0x00080000,
 	0x00080000,
 	0x00080000,
@@ -1519,7 +1519,7 @@ dot11lcnphy_2GHz_extPA_gaintable_rev0[128] = {
 };
 
 
-const struct lcnphy_sfo_cfg lcnphy_sfo_cfg[] = {
+static const struct lcnphy_sfo_cfg lcnphy_sfo_cfg[] = {
 	{965, 1087},
 	{967, 1085},
 	{969, 1082},
@@ -1536,7 +1536,7 @@ const struct lcnphy_sfo_cfg lcnphy_sfo_cfg[] = {
 	{994, 1055}
 };
 
-const struct chan_info_2064_lcnphy chan_info_2064_lcnphy[] = {
+static const struct chan_info_2064_lcnphy chan_info_2064_lcnphy[] = {
 	{1, 2412, 0x0B, 0x0A, 0x00, 0x07, 0x0A, 0x88, 0x88, 0x80},
 	{2, 2417, 0x0B, 0x0A, 0x00, 0x07, 0x0A, 0x88, 0x88, 0x80},
 	{3, 2422, 0x0B, 0x0A, 0x00, 0x07, 0x0A, 0x88, 0x88, 0x80},
@@ -1553,7 +1553,7 @@ const struct chan_info_2064_lcnphy chan_info_2064_lcnphy[] = {
 	{14, 2484, 0x0B, 0x0A, 0x00, 0x07, 0x0A, 0x88, 0x88, 0x80},
 };
 
-const struct lcnphy_radio_regs lcnphy_radio_regs_2064[] = {
+static const struct lcnphy_radio_regs lcnphy_radio_regs_2064[] = {
 	{0x00, 0, 0, 0, 0},
 	{0x01, 0x64, 0x64, 0, 0},
 	{0x02, 0x20, 0x20, 0, 0},
@@ -1862,7 +1862,7 @@ const struct lcnphy_radio_regs lcnphy_radio_regs_2064[] = {
 	{0xFFFF, 0, 0, 0, 0}
 };
 
-const uint32_t lcnphy_23bitgaincode_table[] = {
+static const uint32_t lcnphy_23bitgaincode_table[] = {
 	0x200100,
 	0x200200,
 	0x200004,
@@ -1902,7 +1902,7 @@ const uint32_t lcnphy_23bitgaincode_table[] = {
 	0x04464f,
 };
 
-const int8_t lcnphy_gain_table[] = {
+static const int8_t lcnphy_gain_table[] = {
 	-16,
 	-13,
 	10,
@@ -1942,7 +1942,7 @@ const int8_t lcnphy_gain_table[] = {
 	92,
 };
 
-const int8_t lcnphy_gain_index_offset_for_rssi[] = {
+static const int8_t lcnphy_gain_index_offset_for_rssi[] = {
 	7,
 	7,
 	7,
@@ -1983,7 +1983,7 @@ const int8_t lcnphy_gain_index_offset_for_rssi[] = {
 	-2
 };
 
-const uint16_t LCNPHY_txdigfiltcoeffs_cck[LCNPHY_NUM_TX_DIG_FILTERS_CCK]
+static const uint16_t LCNPHY_txdigfiltcoeffs_cck[LCNPHY_NUM_TX_DIG_FILTERS_CCK]
 	[LCNPHY_NUM_DIG_FILT_COEFFS + 1] = {
 	{0, 1, 415, 1874, 64, 128, 64, 792, 1656, 64, 128, 64, 778, 1582, 64,
 	 128, 64,},
@@ -2013,7 +2013,7 @@ const uint16_t LCNPHY_txdigfiltcoeffs_cck[LCNPHY_NUM_TX_DIG_FILTERS_CCK]
 	 170, 340, 170,},
 };
 
-const uint16_t LCNPHY_txdigfiltcoeffs_ofdm[LCNPHY_NUM_TX_DIG_FILTERS_OFDM]
+static const uint16_t LCNPHY_txdigfiltcoeffs_ofdm[LCNPHY_NUM_TX_DIG_FILTERS_OFDM]
 	[LCNPHY_NUM_DIG_FILT_COEFFS + 1] = {
 	{0, 0, 0xa2, 0x0, 0x100, 0x100, 0x0, 0x0, 0x0, 0x100, 0x0, 0x0,
 	 0x278, 0xfea0, 0x80, 0x100, 0x80,},
@@ -2023,19 +2023,19 @@ const uint16_t LCNPHY_txdigfiltcoeffs_ofdm[LCNPHY_NUM_TX_DIG_FILTERS_OFDM]
 	 0xFEF2, 128, 0xFFE2, 128}
 };
 
-const iqcal_gain_params_lcnphy tbl_iqcal_gainparams_lcnphy_2G[] = {
+static const iqcal_gain_params_lcnphy tbl_iqcal_gainparams_lcnphy_2G[] = {
 	{0, 0, 0, 0, 0, 0, 0, 0, 0},
 };
 
-const iqcal_gain_params_lcnphy *tbl_iqcal_gainparams_lcnphy[1] = {
+static const iqcal_gain_params_lcnphy *tbl_iqcal_gainparams_lcnphy[1] = {
 	tbl_iqcal_gainparams_lcnphy_2G,
 };
 
-const uint16_t iqcal_gainparams_numgains_lcnphy[1] = {
+static const uint16_t iqcal_gainparams_numgains_lcnphy[1] = {
 	ARRAY_SIZE(tbl_iqcal_gainparams_lcnphy_2G),
 };
 
-const
+static const
 uint16_t lcnphy_iqcal_loft_gainladder[] = {
 	((2 << 8) | 0),
 	((3 << 8) | 0),
@@ -2059,7 +2059,7 @@ uint16_t lcnphy_iqcal_loft_gainladder[] = {
 	((128 << 8) | 7)
 };
 
-const
+static const
 uint16_t lcnphy_iqcal_ir_gainladder[] = {
 	((1 << 8) | 0),
 	((2 << 8) | 0),
@@ -2083,7 +2083,7 @@ uint16_t lcnphy_iqcal_ir_gainladder[] = {
 	((128 << 8) | 7)
 };
 
-const
+static const
 struct lcnphy_spb_tone lcnphy_spb_tone_3750[] = {
 	{88, 0},
 	{73, 49},
@@ -2119,7 +2119,7 @@ struct lcnphy_spb_tone lcnphy_spb_tone_3750[] = {
 	{73, -49},
 };
 
-const
+static const
 uint16_t iqlo_loopback_rf_regs[20] = {
 	RADIO_2064_REG036,
 	RADIO_2064_REG11A,
@@ -2143,7 +2143,7 @@ uint16_t iqlo_loopback_rf_regs[20] = {
 	RADIO_2064_REG092,
 };
 
-const
+static const
 uint16_t tempsense_phy_regs[14] = {
 	0x503,
 	0x4a4,
@@ -2161,7 +2161,7 @@ uint16_t tempsense_phy_regs[14] = {
 	0x4a2,
 };
 
-const
+static const
 uint16_t rxiq_cal_rf_reg[11] = {
 	RADIO_2064_REG098,
 	RADIO_2064_REG116,
