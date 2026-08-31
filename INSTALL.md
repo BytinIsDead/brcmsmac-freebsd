@@ -103,12 +103,27 @@ make SYSDIR=/usr/src/sys \
 ## Step 4 — Load the driver
 
 The chip lives on the `bhnd(4)` backplane bus, and the Wi-Fi logic needs the
-`wlan(4)` stack. Load those first, then the driver:
+`wlan(4)` stack. How you get those two depends on your FreeBSD version (this
+is for 15.1):
+
+**`wlan` — nothing to do.** It's compiled **into the GENERIC kernel**
+(`device wlan` is in the default kernel config), so it's already running.
+You only need to `kldload wlan` on a custom kernel that left it out.
+
+**`bhnd` — loadable module, ships with the base system.** It is *not* in
+GENERIC; the module files (`bhnd.ko`, plus `bcma`/`siba`/`bhndb`/`bhndb_pci`
+which it pulls in automatically) are already in `/boot/kernel/`. Load it
+now, then load the driver:
 
 ```sh
-kldstat -m bhnd || kldload bhnd      # skip if already loaded
-kldstat -m wlan || kldload wlan
+kldload bhnd                         # loads bcma/bhndb/etc. automatically
 kldload ./if_bcm4313.ko              # load from this folder
+```
+
+To also load `bhnd` at every boot, add this line to `/boot/loader.conf`:
+
+```
+bhnd_load="YES"
 ```
 
 **Did it work?** Check:
@@ -180,6 +195,7 @@ Now `service netif restart` (or a reboot) brings up Wi-Fi by itself.
 | You see... | What it means | What to do |
 |---|---|---|
 | `kldload: File exists` | Module already loaded | `kldunload if_bcm4313` first. |
+| `kldload bhnd`: File exists | `bhnd` already loaded (or built in) | It's fine — go straight to loading the driver. |
 | `version mismatch` | Headers ≠ running kernel | Rebuild against the release-tag source matching `uname -U`. |
 | Driver loads but no interface | Didn't attach to the chip | `dmesg | tail` — check for SPROM/bus errors; confirm the chip is a BCM4313 (`pciconf -lv`). |
 | `ifconfig` has no `wlan` | `wlan(4)` not loaded | `kldload wlan` (and `bhnd`). |

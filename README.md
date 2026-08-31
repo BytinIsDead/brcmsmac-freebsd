@@ -46,8 +46,9 @@ are required at runtime.
 
 ```sh
 # on a FreeBSD host with kernel source at /usr/src/sys:
+#   (wlan(4) is built into GENERIC; bhnd(4) is a module you must load)
 make SYSDIR=/usr/src/sys clean depend all     # -> if_bcm4313.ko
-kldstat -m bhnd || kldload bhnd
+kldload bhnd                                  # backplane bus (ships in /boot/kernel)
 kldload ./if_bcm4313.ko
 # or after `make install`: kldload if_bcm4313
 ```
