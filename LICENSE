@@ -1,0 +1,165 @@
+LICENSES FOR if_bcm4313 (FreeBSD Broadcom BCM4313 802.11n driver)
+================================================================
+
+Files described by sections 1-3 are dual-licensed BSD-2-Clause OR
+GPL-2.0-or-later as a single coherent rewrite (see section 1).  The firmware
+in section 5 is NOT dual-licensed -- it remains under Broadcom's agreement.
+COPYING holds the GPL-2.0 text used when the GPL option is exercised.
+
+This project is a personal, out-of-tree FreeBSD kernel module.  It
+intentionally does NOT isolate licensing -- it reuses the hardware register
+map and tuning data of the Linux `brcmsmac` driver plus the Broadcom D11/LCN
+firmware blobs directly.  Make sure you are comfortable with the terms below
+before distributing anything built from this tree.
+
+The module is a CASCADE of differently-licensed components.  Each part is
+licensed under its own terms; the obligations of all of them apply to the
+combined module:
+
+-------------------------------------------------------------------------------
+1. Original driver glue -- if_bcm4313.c / if_bcm4313var.h / Makefile
+-------------------------------------------------------------------------------
+Written for this project against FreeBSD's native interfaces (net80211,
+bus_dma(9), bus_space(9), bhnd(4)).  DUAL-LICENSED:
+
+  SPDX-License-Identifier: BSD-2-Clause OR GPL-2.0-or-later
+
+This means redistributors may choose, per binary/source release, to use the
+BSD-2-Clause terms (below) OR the GPL-2.0-or-later terms for the driver code.
+Both are compatible with the ISC-licensed tuning data (section 3).  There is
+no linuxkpi and no GPL-only symbol linkage on the FreeBSD side, so a BSD build
+stays clean for FreeBSD/ports, while a GPL build is available if you ever want
+to fold it into a GPL-licensed kernel tree.  BSD option -- BSD-2-Clause terms:
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are met:
+
+  1. Redistributions of source code must retain the above copyright notice,
+     this list of conditions and the following disclaimer.
+  2. Redistributions in binary form must reproduce the above copyright notice,
+     this list of conditions and the following disclaimer in the documentation
+     and/or other materials provided with the distribution.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+  ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS BE
+  LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+  CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+  SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+  INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+  POSSIBILITY OF SUCH DAMAGE.
+
+  ALTERNATIVE OPTION -- GPL-2.0-or-later: if you choose the GNU General Public
+  License, version 2 or any later version, for the driver code instead of
+  BSD-2-Clause, you may do so; the full GPL-2.0 text is provided in the file
+  COPYING and must accompany any GPL-licensed distribution.  The kernel itself
+  is not re-licensed; only your chosen use of this driver component.
+
+  WHY BOTH OPTIONS ARE AVAILABLE: this is a full rewrite, but its register map
+  and design are translated from the GPL-2.0 Linux kernel brcmsmac driver.
+  Dual-licensing BSD-2-Clause OR GPL-2.0-or-later is what makes the rewrite
+  clean to reuse on either side -- a BSD consumer takes the BSD option, and
+  anyone linking into a GPL-licensed kernel tree takes (or must match) the
+  GPL option, which fully accounts for the GPL provenance.
+
+  IMPORTANT -- the ISC license section 3 allows this ISC data to be carried in
+  either a BSD or GPL build (ISC is compatible with both), but it stays ISC.
+  It cannot be independently re-licensed by you, only sublicensed within the
+two options above.
+
+  NOTE ON PROVENANCE: the register/constant values and the driver design are
+  translated from the Linux kernel `brcmsmac` driver
+  (drivers/net/wireless/broadcom/brcm80211/brcmsmac/), which lives in the
+  GPL-2.0 Linux kernel.  The individual brcmsmac files carry a per-file ISC
+  grant from Broadcom (see section 3 below), which underpins the BSD reuse;
+  and because this is a full rewrite, choosing the GPL-2.0-or-later option
+  fully accounts for the GPL-kernel provenance in any GPL-linked context.  If
+  you distribute under BSD only, the ISC grant is what keeps the translated
+  data usable, so those terms must be preserved.
+
+-------------------------------------------------------------------------------
+2. FreeBSD derivation, attribution and trademark -- READ THIS ONE TOO
+-------------------------------------------------------------------------------
+The driver targets FreeBSD and follows FreeBSD kernel conventions
+($FreeBSD$ keyword, bus_dma(9)/bus_space(9)/net80211/bhnd(4) patterns, and
+the kmod build via bsd.kmod.mk).  Its structure and several API call patterns
+were modeled on FreeBSD kernel drivers such as bwn(4).  FreeBSD itself, and
+the kernel interfaces used here, are distributed under the FreeBSD License
+(BSD-2-Clause); the FreeBSD project's copyright and license terms therefore
+apply to the portions derived from it.
+
+  FreeBSD - Copyright (c) The FreeBSD Project.  All rights reserved.
+  SPDX-License-Identifier: BSD-2-Clause (see section 1 for the text).
+
+Redistributions of source and binary forms based on FreeBSD code must retain
+this copyright notice in the source and in the binary's accompanying
+materials; the driver and this project do so.  When shipping binary kernels
+or modules built from FreeBSD-derived code, you must reproduce the FreeBSD
+license text (section 1) in the distribution.
+
+TRADEMARK: "FreeBSD" is a registered trademark of the FreeBSD Foundation.
+This is an independent, unofficial driver and is in no way affiliated with or
+endorsed by the FreeBSD Foundation, and it must not be presented as an official
+FreeBSD deliverable or as endorsed by the project.  Non-remote references to
+"FreeBSD" here are nominative/descriptive (the OS it runs on).  If you fork,
+rename, or repackage this work, do not imply FreeBSD Foundation endorsement.
+Check https://www.freebsdfoundation.org for the project's trademark and
+logo-usage guidelines before any public distribution under the FreeBSD name.
+
+-------------------------------------------------------------------------------
+3. Dedicated brcmsmac-derived tuning data -- bcm4313_lcntab.h
+-------------------------------------------------------------------------------
+Generated byte-for-byte from brcmsmac phy/phytbl_lcn.c (BCM4313 switch-control
+and RX-gain tables).
+
+  SPDX-License-Identifier: ISC
+
+  Permission to use, copy, modify, and/or distribute this software for any
+  purpose with or without fee is hereby granted, provided that the above
+  copyright notice and this permission notice appear in all copies.
+
+  THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+  WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+  MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+  SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+  WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
+  OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+  CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+  Copyright (c) 2010 Broadcom Corporation
+
+-------------------------------------------------------------------------------
+4. Reference brcmsmac sources -- brcmsmac/
+-------------------------------------------------------------------------------
+Copied verbatim from the Linux kernel for reference.  Each file retains its
+own license header.  All of the bundled files carry the Broadcom per-file ISC
+grant quoted above (Copyright (c) 2010 Broadcom Corporation, plus "Copyright
+(c) 2013 Hauke Mehrtens" on main.c / mac80211_if.c).  They were written to run
+in the GPL-2.0 kernel, so treat them as GPL-on-the-line if you redistribute
+them outside this ISC-granted context.
+
+-------------------------------------------------------------------------------
+5. Firmware -- bcm4313_ucode.c / bcm4313_ucode.h / firmware/brcm/bcm43xx-*.fw
+-------------------------------------------------------------------------------
+The D11/LCN microcode is a Broadcom binary, redistributable ONLY under the
+Broadcom Software License Agreement in firmware/brcm/LICENCE.broadcom_bcm43xx
+("Redistributable. See LICENCE.broadcom_bcm43xx for details.", WHENCE entry
+for brcmsmac).
+
+Obligations that apply to you if you ship it (including embedded inside the
+module in bcm4313_ucode.c):
+
+  - The firmware must be distributed COMPLETE, UNMODIFIED, exactly as
+    provided by Broadcom, and only for use with the Broadcom device it was
+    designed for.  Do not modify or reverse-engineer the blob (do not strip
+    or alter bcm4313_ucode_bin[]/bcm4313_ucode_hdr[]).
+  - Distribute it with a copy of the Software License Agreement (kept among
+    the sources at firmware/brcm/LICENCE.broadcom_bcm43xx).
+  - Keep Broadcom's copyright/trademark notices intact.
+  - The firmware is licensed, not sold; title remains with Broadcom.
+
+If you cannot accept these terms, do not include the microcode: the driver
+will refuse to attach without it.
