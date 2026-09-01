@@ -46,12 +46,15 @@ are required at runtime.
 
 ```sh
 # on a FreeBSD host with kernel source at /usr/src/sys:
-#   (wlan(4) is built into GENERIC; bhnd(4) is a module you must load)
-make SYSDIR=/usr/src/sys clean depend all     # -> if_bcm4313.ko
-kldload bhnd                                  # backplane bus (ships in /boot/kernel)
-kldload ./if_bcm4313.ko
+sh build.sh                                   # -> if_bcm4313.ko (auto-detects paths)
+kldload ./if_bcm4313.ko                       # one load: front-end + whole bhnd chain
 # or after `make install`: kldload if_bcm4313
 ```
+
+The module carries its own PCI front-end (`if_bcm4313_pci.c`) that claims
+the 4313's PCI id (`14e4:4727`) and creates the `bhnd(4)` bridge chain
+itself — FreeBSD's own `bwn_pci` doesn't list the BCM4313, so without this
+front-end the module would load but nothing would ever attach.
 
 Full walkthrough (including custom `KERNCONF` builds and Wi-Fi setup) is in
 [`INSTALL.md`](INSTALL.md).
@@ -60,8 +63,10 @@ Full walkthrough (including custom `KERNCONF` builds and Wi-Fi setup) is in
 
 ```
 if_bcm4313.c           Driver core: attach/init, DMA rings, net80211, microcode upload
+if_bcm4313_pci.c       PCI front-end: claims 14e4:4727, creates the bhnd bridge chain (adapted from bwn_pci)
 if_bcm4313_phy_lcn.c   LCN-PHY programming + calibration (ported from brcmsmac)
 if_bcm4313var.h        Shared structures / prototypes / register constants
+if_bcm4313_pcivar.h    PCI front-end softc / device table
 bcm4313_ucode.c/.h     Embedded D11/LCN microcode (generated)
 bcm4313_lcntab.h       Switch-control + RX-gain tables (generated)
 bcm4313_phytbl_lcn.h   Remaining LCN-PHY tables (generated)

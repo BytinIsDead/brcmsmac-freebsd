@@ -25,14 +25,15 @@ to a network. Three jobs: **build → load → connect**.
 If you already have FreeBSD installed with kernel source, this is all of it:
 
 ```sh
-make SYSDIR=/usr/src/sys clean depend all   # build -> if_bcm4313.ko
-kldload bhnd                                # bus the chip sits on
-kldload wlan                                # wireless stack
-kldload ./if_bcm4313.ko                     # our driver
-dmesg | grep -i bcm4313                     # did it attach?
-ifconfig wlan0 create wlandev <iface>       # make a wireless interface
-ifconfig wlan0 scan                         # see networks?
+sh build.sh                                  # build -> if_bcm4313.ko
+kldload ./if_bcm4313.ko                      # driver + whole bhnd chain (auto)
+dmesg | grep -i bcm4313                      # did it attach?
+ifconfig wlan0 create wlandev <iface>        # make a wireless interface
+ifconfig wlan0 scan                          # see networks?
 ```
+
+That's it — one `kldload` pulls in the PCI front-end and the entire `bhnd`
+bridge chain automatically (see Step 4).
 
 Everything below is the same thing, explained slowly.
 
@@ -79,14 +80,17 @@ git clone --depth 1 --branch release/15.1.0 https://github.com/freebsd/freebsd-s
 
 ## Step 3 — Build the driver
 
-From this folder (the one with the `Makefile`):
+From this folder (the one with the `Makefile`), either:
 
 ```sh
+sh build.sh          # wrapper: auto-detects SYSDIR and KERNBUILDDIR
+# or, the long way:
 make SYSDIR=/usr/src/sys clean depend all
 ```
 
 You should see compiler output and end with a file called **`if_bcm4313.ko`**
-appearing in this folder.
+appearing in this folder. (`sh build.sh check` prints the exact commands
+without running them.)
 
 **Custom kernel?** If you built your FreeBSD kernel from a custom config, add
 `KERNBUILDDIR=` pointing at its build directory:
@@ -102,50 +106,60 @@ make SYSDIR=/usr/src/sys \
 
 ## Step 4 — Load the driver
 
-The chip lives on the `bhnd(4)` backplane bus, and the Wi-Fi logic needs the
-`wlan(4)` stack. How you get those two depends on your FreeBSD version (this
-is for 15.1):
-
-**`wlan` — nothing to do.** It's compiled **into the GENERIC kernel**
-(`device wlan` is in the default kernel config), so it's already running.
-You only need to `kldload wlan` on a custom kernel that left it out.
-
-**`bhnd` — loadable module, ships with the base system.** It is *not* in
-GENERIC. A PCIe chip like the BCM4313 also needs the **PCI→bhnd bridge
-chain** (`bhndb_pci` → `bhndb` → `bcma_bhndb`) before the D11 core is even
-visible. Loading just `kldload bhnd` alone is *not* enough — the bridge
-modules are separate.
-
-The driver now declares dependencies on the whole chain, so loading the
-driver alone pulls everything in:
+Just load the module:
 
 ```sh
-kldload ./if_bcm4313.ko   # auto-loads bhnd, bhndb, bhndb_pci, bcma_bhndb, bhnd_sprom
-```
-
-If your build predates that fix (or `kldload` complains about a missing
-module), load the chain explicitly first:
-
-```sh
-kldload bhnd bhndb bhndb_pci bcma_bhndb bhnd_sprom
 kldload ./if_bcm4313.ko
 ```
 
-To load everything at every boot, add to `/boot/loader.conf`:
+That one command does the whole job. The module carries its own **PCI
+front-end** and declares the full dependency chain, so the whole stack is
+built for you:
 
 ```
-bhnd_load="YES"
-bhndb_load="YES"
-bhndb_pci_load="YES"
-bcma_bhndb_load="YES"
+PCI 14e4:4727 (your BCM4313 card)
+  └─ bcm4313_pci     our PCI front-end (inside this module)
+       └─ bhndb      PCI→bhnd bridge        (bhndb_pci.ko)
+            └─ bhnd  backplane bus          (bcma_bhndb.ko)
+                 └─ D11 core rev 24 → bcm4313 (this driver)
 ```
+
+**Why is the front-end necessary?** The D11 core only becomes a device after
+a PCI driver claims the card and creates the bhnd bus. On FreeBSD that PCI
+driver is `bwn_pci` — but its device table lists only the BCM4331/43224/
+43225, **not the BCM4313**. So previously `kldload` succeeded yet nothing
+ever attached: no bridge, no bus, no D11 core, no interface. This module's
+own `bcm4313_pci` claims `14e4:4727` and builds the chain itself — no
+`/usr/src` patching, no rebuilding FreeBSD's own modules.
+
+`wlan(4)` needs nothing: it is compiled into the GENERIC kernel. Only a
+custom kernel that dropped `device wlan` needs `kldload wlan`.
+
+To load at every boot, install the module and enable it:
+
+```sh
+make SYSDIR=/usr/src/sys install    # copies if_bcm4313.ko into /boot/kernel
+```
+
+```
+# /boot/loader.conf
+if_bcm4313_load="YES"
+```
+
+The bridge-chain modules are pulled in automatically by the module's
+dependencies.
 
 **Did it work?** Check:
 
 ```sh
 kldstat -m if_bcm4313                # is the module in memory?
+devinfo -r | grep -E 'bcm4313|bhnd'  # the whole chain, top to bottom
 dmesg | tail -20                     # recent kernel messages
 ```
+
+`devinfo` should show the chain: `bcm4313_pci0` → `bhndb0` → `bhnd0` → … →
+`bcm43130`. If `bcm4313_pci0` is missing, you're running a stale module
+without the PCI front-end (Step 4).
 
 You want to see the driver *attaching* — e.g. a line mentioning
 `bcm4313` and the D11 core. Then look at your network interfaces:
@@ -209,11 +223,11 @@ Now `service netif restart` (or a reboot) brings up Wi-Fi by itself.
 | You see... | What it means | What to do |
 |---|---|---|
 | `kldload: File exists` | Module already loaded | `kldunload if_bcm4313` first. |
-| `kldload bhnd`: File exists | `bhnd` already loaded (or built in) | It's fine — go straight to loading the driver. |
+| `devinfo` shows no `bcm4313_pci0` | Old module without the PCI front-end | `git pull` and rebuild — `if_bcm4313_pci.c` is what creates the bridge chain. |
 | `version mismatch` | Headers ≠ running kernel | Rebuild against the release-tag source matching `uname -U`. |
-| Driver loads but no interface | Didn't attach to the chip | `sysctl net.wlan.devices` — if it lists `bcm43130`, attach worked and you just need `ifconfig wlan0 create wlandev bcm43130`. If empty, `dmesg | tail` — check for SPROM/bus errors and that `bhnd` is loaded (`kldstat -m bhnd`). |
+| Driver loads but no interface | Didn't attach to the chip | `sysctl net.wlan.devices` — if it lists `bcm43130`, attach worked and you just need `ifconfig wlan0 create wlandev bcm43130`. If empty, run `devinfo -r | grep -E 'bcm4313|bhnd'` — a missing `bcm4313_pci0` means the front-end didn't probe; otherwise `dmesg | tail` shows the failing attach step. |
 | `ifconfig` shows nothing | The interface is simply down | Plain `ifconfig` hides down interfaces — use `ifconfig -a`. The base device is named `bcm43130` (from the module name), then `ifconfig wlan0 create wlandev bcm43130`. |
-| `ifconfig` has no `wlan` | `wlan(4)` not loaded | `kldload wlan` (and `bhnd`). |
+| `ifconfig` has no `wlan` | `wlan(4)` missing | Built into GENERIC; only a custom kernel without `device wlan` needs `kldload wlan`. |
 | Loads but Wi-Fi is flaky | Usually SPROM/tuning issues | Set `sysctl hw.bcm4313.debug=1` (needs a debug build) and collect `dmesg` output for a report. |
 | **No attach at all** | Chip isn't BCM4313 | If it's a BCM943142HM/BCM43142 (FullMAC), this softMAC driver can't drive it — see the note at the top. |
 

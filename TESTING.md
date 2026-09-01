@@ -56,14 +56,15 @@ On a FreeBSD **15.1-RELEASE** amd64 machine with a BCM4313:
 uname -U                          # expect 1501000
 make SYSDIR=/usr/src/sys clean depend all     # -> if_bcm4313.ko
 
-# 2. dependencies
-kldstat -m bhnd || kldload bhnd
+# 2. dependencies (the driver pulls in its own bhnd bridge chain;
+#    wlan(4) is compiled into GENERIC -- only custom kernels need it)
 kldstat -m wlan || kldload wlan
 
 # 3. attach
 kldload ./if_bcm4313.ko
 
-# 4. confirm it claimed the D11 core and registered an interface
+# 4. confirm the PCI front-end built the chain and the D11 core registered
+devinfo -r | grep -E 'bcm4313|bhnd'    # bcm4313_pci0 -> bhndb0 -> bhnd0 -> bcm43130
 dmesg | grep -i bcm4313
 ifconfig -v | grep -A2 -i "bcm4313\|wlan"
 

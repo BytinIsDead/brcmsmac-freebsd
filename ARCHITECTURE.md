@@ -16,6 +16,7 @@ it for the FreeBSD driver model:
    brcms_ucode data                ->  bcm4313_ucode.c/.h     (embedded)
    phytbl_lcn.c tuning tables      ->  bcm4313_lcntab.h / bcm4313_phytbl_lcn.h
    bcma/bcma bus                   ->  bhnd(4)
+   bwn_pci PCI front-end           ->  if_bcm4313_pci.c (bhndb bridge glue)
    mac80211                        ->  net80211
 ```
 
@@ -27,6 +28,7 @@ sources so a reviewer can diff the port against them.
 | File | Content |
 |------|---------|
 | `if_bcm4313.c` | `bcm4313_attach(9)` / detach, DMA64 rings, TX/RX `mbuf` path, net80211 glue (`ic_*` callbacks), microcode upload, SPROM/`bhnd_nvram` reads, `bhnd` device table |
+| `if_bcm4313_pci.c` / `if_bcm4313_pcivar.h` | PCI front-end: claims `14e4:4727` and attaches the `bhndb` bridge via `bhndb_pci_driver` (adapted from FreeBSD's `if_bwn_pci.c`, which does not list the BCM4313) |
 | `if_bcm4313_phy_lcn.c` | The LCN-PHY: `bcm4313_lcnphy_init`, channel set, RX-gain/TX-power tables loading, IQ / tempsense calibration, switch-control write, per-rate txpower |
 | `if_bcm4313var.h` | `struct bcm4313_softc`, DMA ring structs, register offsets/bitfields, LCN-PHY prototypes and calibration-mode defines |
 | `bcm4313_ucode.c/.h` | Embedded D11/LCN microcode blob + firmware section header (generated) |

@@ -8,14 +8,19 @@ uname -U
 echo
 echo "===== kernel modules present on disk ====="
 # NOTE: bhnd_sprom is compiled INTO bhnd.ko (no separate .ko file).
-for m in bhnd bhndb bhndb_pci bcma_bhndb; do
+for m in bhnd bhndb bhndb_pci bcma_bhndb siba_bhndb; do
     ls -l /boot/kernel/$m.ko 2>&1
 done
 echo
 echo "===== loaded modules ====="
-for m in bhnd bhndb bhndb_pci bcma_bhndb if_bcm4313; do
+for m in bhnd bhndb bhndb_pci bcma_bhndb siba_bhndb if_bcm4313; do
     kldstat -m $m 2>&1
 done
+echo
+echo "===== device tree: did the PCI front-end build the bhnd chain? ====="
+# Expect: bcm4313_pci0 -> bhndb0 -> bhnd0 -> ... -> bcm43130.  A missing
+# bcm4313_pci0 means the module predates the if_bcm4313_pci.c front-end.
+devinfo -r 2>&1 | grep -E 'bcm4313|bhnd'
 echo
 echo "===== built driver present in this dir? ====="
 pwd

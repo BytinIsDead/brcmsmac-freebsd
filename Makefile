@@ -20,12 +20,14 @@ SYSDIR?=	/usr/src/sys
 
 KMOD	= if_bcm4313
 SRCS	= if_bcm4313.c
+SRCS	+= if_bcm4313_pci.c
+SRCS	+= if_bcm4313_pcivar.h
 SRCS	+= if_bcm4313_phy_lcn.c
 SRCS	+= bcm4313_ucode.c
 SRCS	+= bhnd_bus_if.h bhnd_chipc_if.h bhnd_pmu_if.h bhnd_pwrctl_if.h
 SRCS	+= bhndb_bus_if.h bhndb_if.h
 SRCS	+= bhnd_nvram_map.h
-SRCS	+= device_if.h bus_if.h
+SRCS	+= device_if.h bus_if.h pci_if.h
 
 # The *_if.h headers above are generated from .m files with makeobjops.
 # In-tree module builds get the .m search path from __MPATH (kernel build
@@ -37,11 +39,16 @@ SRCS	+= device_if.h bus_if.h
 		${SYSDIR}/dev/bhnd/cores/chipc \
 		${SYSDIR}/dev/bhnd/cores/chipc/pwrctl \
 		${SYSDIR}/dev/bhnd/cores/pmu \
+		${SYSDIR}/dev/pci \
 		${SYSDIR}/kern
 
 # bhnd(4) headers include each other with quoted, directory-relative
 # includes; make sure the bhnd include dir is on the path.
 CFLAGS+=	-I${SYSDIR}/dev/bhnd
+
+# The PCI front-end (if_bcm4313_pci.c) claims 14e4:4727 and creates the
+# bhnd(4) bridge chain (bhndb_pci -> bhndb -> bcma_bhndb -> bhnd); it is
+# derived from FreeBSD's if_bwn_pci.c (BSD-2-Clause, Landon Fuller).
 
 # The LCN-PHY tuning tables (bcm4313_lcntab.h, bcm4313_phytbl_lcn.h) and
 # the embedded D11/LCN microcode (bcm4313_ucode.c/.h) are generated from
@@ -55,6 +62,6 @@ CFLAGS+=	-I${SYSDIR}/dev/bhnd
 # Keep the generated interface headers out of the source tree on clean.
 CLEANFILES+=	bhnd_bus_if.h bhnd_chipc_if.h bhnd_pmu_if.h \
 		bhnd_pwrctl_if.h bhndb_bus_if.h bhndb_if.h bhnd_nvram_map.h \
-		device_if.h bus_if.h
+		device_if.h bus_if.h pci_if.h
 
 .include <bsd.kmod.mk>

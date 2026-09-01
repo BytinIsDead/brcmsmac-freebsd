@@ -12,7 +12,9 @@
  *
  * Architecture:
  *  - Attaches to the enumerated D11 (802.11 MAC) core on the bhnd(4)
- *    backplane (bhndb(4) matches the PCI 0x14e4:0x4313 bridge).
+ *    backplane.  The PCI front-end (if_bcm4313_pci.c) claims the
+ *    0x14e4:0x4727 device and instantiates the bhndb(4) bridge chain,
+ *    because FreeBSD's own bwn_pci does not list the BCM4313.
  *  - Hardware programming is translated from the Linux brcmsmac driver:
  *    D11 core registers (d11.h), dma64 descriptor engine (dma.h/dma.c),
  *    and LCN-PHY register space (phy/phy_lcn.h).
@@ -1965,5 +1967,6 @@ MODULE_DEPEND(if_bcm4313, bhnd, 1, 1, 1);
 MODULE_DEPEND(if_bcm4313, bhndb, 1, 1, 1);
 MODULE_DEPEND(if_bcm4313, bhndb_pci, 1, 1, 1);
 MODULE_DEPEND(if_bcm4313, bcma_bhndb, 1, 1, 1);
+MODULE_DEPEND(if_bcm4313, siba_bhndb, 1, 1, 1);
 MODULE_DEPEND(if_bcm4313, bhnd_sprom, 1, 1, 1);
 MODULE_DEPEND(if_bcm4313, wlan, 1, 1, 1);
