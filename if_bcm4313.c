@@ -110,10 +110,14 @@ static int	bcm4313_ucode_download(struct bcm4313_softc *);
 #define	BCM4313_TXBUFSZ			4096
 #define	BCM4313_TX_FRAMES		(BCM4313_NTX_DESC / 2)
 
-/* D11 core I/O control flags (bhnd BHND_IOCTL_CFLAGS range). */
-#define	BCM4313_IOCTL_SUPPORT_G		0x0002
-#define	BCM4313_IOCTL_PHYRESET		0x0004
-#define	BCM4313_IOCTL_PHYCLOCK_ENABLE	0x0008
+/* D11 core I/O control flags (brcmsmac d11.h: SICF_GMODE/SICF_PRST/
+ * SICF_PCLKE).  Bits 0x0001 (BHND_IOCTL_CLK_EN) and 0x0002
+ * (BHND_IOCTL_CLK_FORCE) are owned exclusively by the bhnd(4) backend --
+ * never pass them in a bhnd_reset_hw()/bhnd_write_ioctl() value, or the
+ * bcma backend rejects the call with EINVAL. */
+#define	BCM4313_IOCTL_SUPPORT_G		0x2000
+#define	BCM4313_IOCTL_PHYRESET		0x0008
+#define	BCM4313_IOCTL_PHYCLOCK_ENABLE	0x0004
 
 /* RCM (receive match) registers -- used to program MAC/BSSID. */
 #define	BCM4313_D11_RCM_CTL		0x420
@@ -1669,8 +1673,12 @@ bcm4313_attach(device_t dev)
 		goto fail;
 	}
 
-	/* Bring the core out of reset, read PHY/radio identity. */
-	if ((error = bhnd_reset_hw(dev, BHND_IOCTL_CLK_EN, 0)) != 0) {
+	/* Bring the core out of reset, read PHY/radio identity.  The bhnd
+	 * backend owns BHND_IOCTL_CLK_EN/BHND_IOCTL_CLK_FORCE exclusively and
+	 * returns EINVAL if a driver passes them to bhnd_reset_hw(); it sets
+	 * the clock bits itself when releasing reset, and we re-request the
+	 * HT clock right below. */
+	if ((error = bhnd_reset_hw(dev, 0, 0)) != 0) {
 		device_printf(dev, "core reset failed: %d\n", error);
 		goto fail;
 	}
