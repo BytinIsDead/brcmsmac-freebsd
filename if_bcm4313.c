@@ -1880,6 +1880,8 @@ bcm4313_attach(device_t dev)
 	ic->ic_nchans = 0;
 	bcm4313_add_channels(ic->ic_channels, IEEE80211_CHAN_MAX,
 	    &ic->ic_nchans);
+	device_printf(dev, "channels ready: %d (2.4GHz b/g/ng HT20)\n",
+	    ic->ic_nchans);
 	ieee80211_ifattach(ic);
 	ic->ic_transmit = bcm4313_transmit;
 	ic->ic_raw_xmit = bcm4313_raw_xmit;
