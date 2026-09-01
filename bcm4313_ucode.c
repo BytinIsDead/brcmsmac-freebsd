@@ -15,8 +15,8 @@
  *   brcm/bcm43xx_hdr-0.fw   (bcm4313_ucode_hdr[] -- firmware_hdr section list)
  *
  * For BCM4313 (D11 core rev 24 / LCN PHY) the LCN section is the one tagged
- * D11UCODE_OVERSIGHT24_LCN (idx 11); its size lives in the section tagged
- * D11UCODE_OVERSIGHT24_LCNSZ (idx 12).  Loading this gives the D11 MAC core
+ * D11UCODE_OVERSIGHT24_LCN (idx 12); its size lives in the section tagged
+ * D11UCODE_OVERSIGHT24_LCNSZ (idx 13).  Loading this gives the D11 MAC core
  * its microcode (brcmsmac brcms_ucode_write + brcms_ucode_download).
  *
  * Embedded so the driver is self-contained on FreeBSD.  The source .fw files

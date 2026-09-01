@@ -1004,8 +1004,8 @@ bcm4313_raw_xmit(struct ieee80211_node *ni, struct mbuf *m,
  * D11 microcode upload (brcmsmac ucode_loader.c / main.c).
  *
  * The LCN microcode for BCM4313 (D11 rev 24) is the section of
- * brcm/bcm43xx-0.fw tagged D11UCODE_OVERSIGHT24_LCN (idx 11); its length in
- * bytes lives in the section tagged D11UCODE_OVERSIGHT24_LCNSZ (idx 12).
+ * brcm/bcm43xx-0.fw tagged D11UCODE_OVERSIGHT24_LCN (idx 12); its length in
+ * bytes lives in the section tagged D11UCODE_OVERSIGHT24_LCNSZ (idx 13).
  * It is uploaded through the OBJADDR microcode window:
  *   objaddr = OBJADDR_AUTO_INC | OBJADDR_UCM_SEL;
  *   for each LE u32: objdata = word;

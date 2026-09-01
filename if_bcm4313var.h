@@ -668,8 +668,8 @@ struct bcm4313_fw_hdr {
 /* Ucode section tags (ucode_loader.h enum). */
 #define	BCM4313_D11LCN0BSINITVALS24	1	/* LCN band-selective init */
 #define	BCM4313_D11LCN0INITVALS24	2	/* LCN MAC-core init */
-#define	BCM4313_D11UCODE_OVERSIGHT24_LCN	11	/* the LCN microcode */
-#define	BCM4313_D11UCODE_OVERSIGHT24_LCNSZ 12	/* LCN ucode size (words) */
+#define	BCM4313_D11UCODE_OVERSIGHT24_LCN	12	/* the LCN microcode (ucode_loader.h enum) */
+#define	BCM4313_D11UCODE_OVERSIGHT24_LCNSZ 13	/* LCN ucode size (words) */
 
 /* A single ucode/SHM/IHR register-tweak directive (struct d11init). */
 struct bcm4313_d11init {
