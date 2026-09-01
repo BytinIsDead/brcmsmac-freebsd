@@ -32,12 +32,13 @@ ifconfig wlan0 create wlandev <iface>        # make a wireless interface
 ifconfig wlan0 scan                          # see networks?
 ```
 
-Or, as root, one shot — build, install into `/boot/modules`, (re)load and
-verify, with an optional `boot` argument to load it at startup:
+Or, as root, one shot — build, install into `/boot/modules`, (re)load,
+create `wlan0`, bring it up and scan, with an optional `boot` argument
+that also enables everything at startup:
 
 ```sh
-sh install.sh            # build + install + kldload + verify
-sh install.sh boot       # same, plus if_bcm4313_load="YES" in loader.conf
+sh install.sh            # build + install + kldload + wlan0 up + scan
+sh install.sh boot       # same, plus loader.conf + rc.conf entries
 ```
 
 That's it — one `kldload` pulls in the PCI front-end and the entire `bhnd`

@@ -1,15 +1,18 @@
 #!/bin/sh
-# install.sh -- turnkey install + load of the if_bcm4313 driver on FreeBSD.
+# install.sh -- turnkey driver install + wifi bring-up on FreeBSD.
 #
 # Usage (run as root on a FreeBSD 14.x/15.x machine, from this directory):
-#   sh install.sh          # build, install to /boot/modules, (re)load, verify
-#   sh install.sh boot     # same, plus enable loading at boot via loader.conf
+#   sh install.sh          # build, install, (re)load, create wlan0, up, scan
+#   sh install.sh boot     # same, plus load at boot (loader.conf + rc.conf)
 #   sh install.sh --skip-build   # install the existing if_bcm4313.ko only
 #
 # Environment overrides (passed through to build.sh):
 #   SYSDIR=/path/to/sys        kernel source tree (default: /usr/src/sys)
 #   KERNBUILDDIR=/path         kernel build dir with opt_*.h (auto-detected)
 #   JOBS=n                     make -j value
+#   WLDEV=bcm43130             net80211 device name (default: from
+#                              `sysctl net.wlan.devices`)
+#   WLANIF=wlan0               interface to create over WLDEV
 #
 # The driver trades itself in safely: any already-loaded if_bcm4313 is
 # unloaded first, so this can be re-run after `git pull` to upgrade in
@@ -33,6 +36,8 @@ for a in "$@"; do
 done
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+WLDEV="${WLDEV:-}"
+WLANIF="${WLANIF:-wlan0}"
 
 # --- sanity checks ----------------------------------------------------------
 case "$(uname -s 2>/dev/null)" in
@@ -75,7 +80,8 @@ fi
 if kldstat -q -m if_bcm4313; then
     echo "==> unloading old if_bcm4313"
     kldunload if_bcm4313 || {
-        echo "ERROR: could not unload if_bcm4313 (in use? try: ifconfig wlan0 destroy)" >&2
+        echo "ERROR: could not unload if_bcm4313. Are its wlan interfaces up?" >&2
+        echo "       Detach them first, e.g.:  ifconfig $WLANIF down && ifconfig $WLANIF destroy" >&2
         exit 1
     }
 fi
@@ -87,26 +93,51 @@ kldload if_bcm4313 || {
     echo "       Diagnose with: dmesg | tail -30" >&2
     exit 1
 }
+sleep 1
 
-# --- verify ------------------------------------------------------------------
-echo
-echo "==> devices:"
-sysctl net.wlan.devices
-
-echo
-echo "==> attach log:"
-dmesg | grep -i 'bcm4313\|bhnd' | tail -8
-
-echo
-if sysctl net.wlan.devices | grep -q bcm43130; then
-    echo "Driver is live. Create an interface with:"
-    echo "    ifconfig wlan0 create wlandev bcm43130"
-    echo "    ifconfig wlan0 up"
-    echo "    ifconfig wlan0 scan"
-else
-    echo "NOTE: driver loaded but no bcm43130 device yet; check the attach"
-    echo "      log above (or run: sh diag.sh)."
+# --- find the net80211 device -------------------------------------------------
+if [ -z "$WLDEV" ]; then
+    WLDEV="$(sysctl -n net.wlan.devices 2>/dev/null | tr ' ' '\n' | grep '^bcm4313' | head -1)"
 fi
+[ -n "$WLDEV" ] || {
+    echo "ERROR: no bcm4313* device in: $(sysctl -n net.wlan.devices 2>/dev/null)" >&2
+    echo "       Attach failed; check: dmesg | tail -20   (or: sh diag.sh)" >&2
+    exit 1
+}
+echo "==> using wireless device: $WLDEV"
+
+# --- wifi steps ---------------------------------------------------------------
+echo "==> creating $WLANIF over $WLDEV"
+ifconfig "$WLANIF" destroy 2>/dev/null   # drop a stale copy, if any
+ifconfig "$WLANIF" create wlandev "$WLDEV" || {
+    echo "ERROR: could not create $WLANIF over $WLDEV" >&2
+    exit 1
+}
+
+echo "==> bringing $WLANIF up"
+ifconfig "$WLANIF" up || {
+    echo "ERROR: could not bring $WLANIF up" >&2
+    echo "       Diagnose with: dmesg | tail -30" >&2
+    exit 1
+}
+
+echo "==> MAC address: $(ifconfig "$WLANIF" | awk '/ether/{print $2}')"
+
+echo "==> scanning (3 seconds)..."
+ifconfig "$WLANIF" scan >/dev/null 2>&1
+sleep 3
+echo
+echo "==> networks found:"
+ifconfig "$WLANIF" list scan 2>/dev/null | head -20
+echo
+
+# --- summary -----------------------------------------------------------------
+echo "Driver is live. To join a network now:"
+echo "    ifconfig $WLANIF ssid YOUR_SSID wpakey YOUR_PASSWORD"
+echo "    dhclient $WLANIF          # or: dhcpcd $WLANIF"
+echo "Or with wpa_supplicant instead of an inline key:"
+echo "    wpa_supplicant -B -i $WLANIF -c /etc/wpa_supplicant.conf"
+echo "    dhclient $WLANIF"
 
 # --- optional boot persistence ------------------------------------------------
 if [ "$MODE" = "boot" ]; then
@@ -117,6 +148,17 @@ if [ "$MODE" = "boot" ]; then
         echo "==> appending 'if_bcm4313_load=\"YES\"' to $conf"
         echo 'if_bcm4313_load="YES"' >> "$conf"
     fi
-    echo "Note: add a wlan0 + wlans_if_bcm43130 entry in /etc/rc.conf to"
-    echo "      bring the interface up at boot; see INSTALL.md."
+
+    rcconf="/etc/rc.conf"
+    if grep -q "wlans_if_${WLDEV}=" "$rcconf" 2>/dev/null; then
+        echo "==> $rcconf already creates a wlan over $WLDEV"
+    else
+        echo "==> appending 'wlans_if_${WLDEV}=\"$WLANIF\"' to $rcconf"
+        echo "wlans_if_${WLDEV}=\"$WLANIF\"" >> "$rcconf"
+    fi
+    echo
+    echo "To also connect + get an address at boot, add to $rcconf:"
+    echo "    ifconfig_${WLANIF}=\"WPA DHCP\""
+    echo "    wpa_supplicant_enable=\"YES\""
+    echo "and put your network in /etc/wpa_supplicant.conf (see INSTALL.md)."
 fi
