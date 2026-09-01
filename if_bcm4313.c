@@ -1608,7 +1608,7 @@ bcm4313_attach(device_t dev)
 	struct bcm4313_rx_radiotap_header *rx_th;
 	const char *mac_varname;
 	char chip_name[BHND_CHIPID_MAX_NAMELEN];
-	uint16_t phyver;
+	uint16_t phyver, ioctl;
 	int error, rid;
 
 	sc->sc_dev = dev;
@@ -1673,15 +1673,19 @@ bcm4313_attach(device_t dev)
 		goto fail;
 	}
 
-	/* Bring the core out of reset, read PHY/radio identity.  The bhnd
-	 * backend owns BHND_IOCTL_CLK_EN/BHND_IOCTL_CLK_FORCE exclusively and
-	 * returns EINVAL if a driver passes them to bhnd_reset_hw(); it sets
-	 * the clock bits itself when releasing reset, and we re-request the
-	 * HT clock right below. */
-	if ((error = bhnd_reset_hw(dev, 0, 0)) != 0) {
+	/* Bring the core out of reset with the PHY clock enabled so that
+	 * PHYVER is readable (bwn's bwn_reset_core / brcmsmac's core-up
+	 * pattern).  The bhnd backend owns BHND_IOCTL_CLK_EN/BHND_IOCTL_CLK_FORCE
+	 * exclusively and returns EINVAL if a driver passes them to
+	 * bhnd_reset_hw(); it sets the clock bits itself when releasing reset,
+	 * and we re-request the HT clock below. */
+	ioctl = BCM4313_IOCTL_PHYRESET | BCM4313_IOCTL_PHYCLOCK_ENABLE |
+	    BCM4313_IOCTL_SUPPORT_G;
+	if ((error = bhnd_reset_hw(dev, ioctl, ioctl)) != 0) {
 		device_printf(dev, "core reset failed: %d\n", error);
 		goto fail;
 	}
+	DELAY(2000);
 	if ((error = bhnd_request_clock(dev, BHND_CLOCK_HT)) != 0) {
 		device_printf(dev, "clock request failed: %d\n", error);
 		goto fail;
