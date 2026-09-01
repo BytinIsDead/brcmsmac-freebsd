@@ -1463,6 +1463,23 @@ bcm4313_intrtask(void *arg, int pending)
 	}
 	if (reason & (BCM4313_MI_MACTXERR | BCM4313_MI_PHYTXERR))
 		counter_u64_add(sc->sc_ic.ic_oerrors, 1);
+	if (reason & BCM4313_MI_TFS) {
+		/*
+		 * TX statuses pending: drain the status ring so the ucode can
+		 * post completions for further frames.  Without this the status
+		 * FIFO fills, the TX path wedges and the watchdog is forced to
+		 * reset the MAC.  (brcmsmac: MI_TFS -> brcms_b_txstatus().)
+		 */
+		bcm4313_txstatus_harvest(sc, &sc->sc_txstatus);
+		bcm4313_tx_reclaim(sc, &sc->sc_tx, 0);
+		sc->sc_watchdog_timer = 5;
+	}
+	if (reason & BCM4313_MI_GP0) {
+		/* D11 PSM microcode watchdog; brcmsmac treats MI_GP0 as fatal. */
+		device_printf(sc->sc_dev, "PSM microcode watchdog fired\n");
+		counter_u64_add(sc->sc_ic.ic_oerrors, 1);
+		sc->sc_watchdog_timer = 1;
+	}
 	BCM4313_UNLOCK(sc);
 }
 
@@ -1474,9 +1491,23 @@ bcm4313_watchdog(void *arg)
 	BCM4313_LOCK(sc);
 	if (sc->sc_flags & BCM4313_FLAG_RUNNING) {
 		if (--sc->sc_watchdog_timer <= 0) {
+			uint32_t mc;
+
 			device_printf(sc->sc_dev,
 			    "watchdog timeout: resetting MAC\n");
 			counter_u64_add(sc->sc_ic.ic_oerrors, 1);
+			/*
+			 * Halt the D11 PSM before the core reset.  A wedged ucode can
+			 * hold a backplane transaction, so the DMP reset handshake never
+			 * completes (bcma_dmp_wait_reset -> ETIMEDOUT, "BCMA_DMP_RESETSTATUS
+			 * timeout").  Force the ucode to jump to 0 and drop MAC+PSM run,
+			 * like brcmsmac's "just stop the psm" path, before the reset.
+			 */
+			mc = bcm4313_read_4(sc, BCM4313_D11_MACCONTROL);
+			mc &= ~(BCM4313_MCTL_EN_MAC | BCM4313_MCTL_PSM_RUN);
+			mc |= BCM4313_MCTL_PSM_JMP_0;
+			bcm4313_write_4(sc, BCM4313_D11_MACCONTROL, mc);
+			DELAY(1000);
 			bcm4313_init_locked(sc);
 		}
 	}
@@ -1588,8 +1619,8 @@ bcm4313_init_locked(struct bcm4313_softc *sc)
 		goto fail;
 
 	/* Interrupts. */
-	sc->sc_intr_mask = BCM4313_MI_DMAINT | BCM4313_MI_MACTXERR |
-	    BCM4313_MI_PHYTXERR;
+	sc->sc_intr_mask = BCM4313_MI_DMAINT | BCM4313_MI_TFS |
+	    BCM4313_MI_GP0 | BCM4313_MI_MACTXERR | BCM4313_MI_PHYTXERR;
 	bcm4313_write_4(sc, BCM4313_D11_MACINTMASK, sc->sc_intr_mask);
 
 	/* Start the MAC. */

@@ -105,6 +105,7 @@ MALLOC_DECLARE(M_BCM4313);
 #define	BCM4313_MI_MACTXERR		(1 << 9)
 #define	BCM4313_MI_PHYTXERR		(1 << 11)
 #define	BCM4313_MI_PME			(1 << 12)
+#define	BCM4313_MI_GP0			(1 << 13)
 #define	BCM4313_MI_DMAINT		(1 << 15)
 #define	BCM4313_MI_TXSTOP		(1 << 16)
 #define	BCM4313_MI_PWRUP		(1 << 21)
