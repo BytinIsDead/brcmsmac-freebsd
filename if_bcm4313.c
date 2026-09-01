@@ -1475,10 +1475,25 @@ bcm4313_intrtask(void *arg, int pending)
 		sc->sc_watchdog_timer = 5;
 	}
 	if (reason & BCM4313_MI_GP0) {
-		/* D11 PSM microcode watchdog; brcmsmac treats MI_GP0 as fatal. */
-		device_printf(sc->sc_dev, "PSM microcode watchdog fired\n");
+		/*
+		 * D11 PSM microcode watchdog; brcmsmac treats MI_GP0 as fatal
+		 * (brcms_fatal_error -> full restart).  Deliberately do NOT feed
+		 * the watchdog callout: a fresh wedge on every tick would grind
+		 * the core with resets (and DMP handshake timeouts) until the
+		 * card is unrecoverable.  Halt the MAC, drop FLAG_RUNNING so
+		 * transmit() rejects frames, and unmask GP0; the next
+		 * init_locked() (via `ifconfig wlan0 up`) restores the mask and
+		 * retries cleanly.
+		 */
+		device_printf(sc->sc_dev,
+		    "PSM microcode watchdog fired; MAC stopped, re-up to recover\n");
 		counter_u64_add(sc->sc_ic.ic_oerrors, 1);
-		sc->sc_watchdog_timer = 1;
+		bcm4313_write_4(sc, BCM4313_D11_MACCONTROL,
+		    bcm4313_read_4(sc, BCM4313_D11_MACCONTROL) &
+		    ~(BCM4313_MCTL_EN_MAC | BCM4313_MCTL_PSM_RUN));
+		sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
+		sc->sc_intr_mask &= ~BCM4313_MI_GP0;
+		bcm4313_write_4(sc, BCM4313_D11_MACINTMASK, sc->sc_intr_mask);
 	}
 	BCM4313_UNLOCK(sc);
 }
