@@ -1215,9 +1215,15 @@ bcm4313_set_slot(struct bcm4313_softc *sc, uint16_t slot)
  * net80211 glue.
  * ---------------------------------------------------------------------------
  */
+/* Build the 2.4GHz channel list (b/g/ng, HT20).  bwn fills its channel
+ * table before ieee80211_ifattach(); net80211's ieee80211_chan_init()
+ * reads ic_channels/ic_nchans immediately and panics in
+ * ieee80211_get_ratetable() ("no rate table for channel; freq 0
+ * flags 0x0") if they are not populated yet -- the KASSERT guards
+ * are compiled out on release kernels. */
 static void
-bcm4313_getradiocaps(struct ieee80211com *ic, int maxchans, int *nchans,
-    struct ieee80211_channel chans[])
+bcm4313_add_channels(struct ieee80211_channel *chans, int maxchans,
+    int *nchans)
 {
 	uint8_t bands[IEEE80211_MODE_BYTES];
 
@@ -1228,6 +1234,13 @@ bcm4313_getradiocaps(struct ieee80211com *ic, int maxchans, int *nchans,
 	ieee80211_add_channel_list_2ghz(chans, maxchans, nchans, NULL, 0,
 	    bands, IEEE80211_CHAN_2GHZ | IEEE80211_CHAN_B |
 	    IEEE80211_CHAN_G | IEEE80211_CHAN_HT20);
+}
+
+static void
+bcm4313_getradiocaps(struct ieee80211com *ic, int maxchans, int *nchans,
+    struct ieee80211_channel chans[])
+{
+	bcm4313_add_channels(chans, maxchans, nchans);
 }
 
 static void
@@ -1854,10 +1867,16 @@ bcm4313_attach(device_t dev)
 		goto fail;
 	}
 
-	/* Channel list (via ic_getradiocaps) + default methods. */
+	/* Channel list: populate ic_channels/ic_nchans BEFORE ifattach
+	 * (ieee80211_chan_init() reads them immediately; see
+	 * bcm4313_add_channels above).  ic_getradiocaps is still provided
+	 * for regdomain updates. */
 	ic->ic_getradiocaps = bcm4313_getradiocaps;
+	memset(ic->ic_channels, 0, sizeof(ic->ic_channels));
+	ic->ic_nchans = 0;
+	bcm4313_add_channels(ic->ic_channels, IEEE80211_CHAN_MAX,
+	    &ic->ic_nchans);
 	ieee80211_ifattach(ic);
-	ieee80211_chan_init(ic);
 	ic->ic_transmit = bcm4313_transmit;
 	ic->ic_raw_xmit = bcm4313_raw_xmit;
 	ic->ic_parent = bcm4313_parent;
