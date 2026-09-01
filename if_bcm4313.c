@@ -1231,9 +1231,13 @@ bcm4313_add_channels(struct ieee80211_channel *chans, int maxchans,
 	setbit(bands, IEEE80211_MODE_11B);
 	setbit(bands, IEEE80211_MODE_11G);
 	setbit(bands, IEEE80211_MODE_11NG);
-	ieee80211_add_channel_list_2ghz(chans, maxchans, nchans, NULL, 0,
-	    bands, IEEE80211_CHAN_2GHZ | IEEE80211_CHAN_B |
-	    IEEE80211_CHAN_G | IEEE80211_CHAN_HT20);
+	/* Default 2.4GHz list (channels 1-14).  NOTE: passing a NULL
+	 * channel list to ieee80211_add_channel_list_2ghz() adds NOTHING
+	 * (add_chanlist iterates the supplied table); the default-2ghz
+	 * helper is what supplies the standard list.  HT20 comes from
+	 * MODE_11NG; cbw_flags=0 keeps HT40 out. */
+	ieee80211_add_channels_default_2ghz(chans, maxchans, nchans,
+	    bands, 0);
 }
 
 static void
