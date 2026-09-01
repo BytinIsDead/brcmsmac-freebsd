@@ -1250,16 +1250,34 @@ bcm4313_getradiocaps(struct ieee80211com *ic, int maxchans, int *nchans,
 static void
 bcm4313_scan_start(struct ieee80211com *ic)
 {
-	struct bcm4313_softc *sc __unused = ic->ic_softc;
+	struct bcm4313_softc *sc = ic->ic_softc;
 
+	BCM4313_LOCK(sc);
+	if ((sc->sc_flags & BCM4313_FLAG_RUNNING) != 0) {
+		/*
+		 * During a scan the MAC must pass beacons from any BSSID
+		 * (not just the RCM-filtered one) up to net80211.  Same
+		 * bit bwn sets in bwn_scan_start() and brcmsmac raises
+		 * for FIF_BCN_PRBRESP_PROMISC (MCTL_BCNS_PROMISC).
+		 */
+		bcm4313_maskset_4(sc, BCM4313_D11_MACCONTROL, ~0,
+		    BCM4313_MCTL_BCNS_PROMISC);
+	}
+	BCM4313_UNLOCK(sc);
 	BCM4313_DPRINTF(sc, "scan start\n");
 }
 
 static void
 bcm4313_scan_end(struct ieee80211com *ic)
 {
-	struct bcm4313_softc *sc __unused = ic->ic_softc;
+	struct bcm4313_softc *sc = ic->ic_softc;
 
+	BCM4313_LOCK(sc);
+	if ((sc->sc_flags & BCM4313_FLAG_RUNNING) != 0) {
+		bcm4313_maskset_4(sc, BCM4313_D11_MACCONTROL,
+		    ~BCM4313_MCTL_BCNS_PROMISC, 0);
+	}
+	BCM4313_UNLOCK(sc);
 	BCM4313_DPRINTF(sc, "scan end\n");
 }
 
