@@ -41,6 +41,15 @@ sh install.sh            # build + install + kldload + wlan0 up + scan
 sh install.sh boot       # same, plus loader.conf + rc.conf entries
 ```
 
+Once the driver is up, join a network (DHCP included) and optionally persist
+it across reboots:
+
+```sh
+sh config.sh MySSID MyPassword        # connect now + dhclient
+sh config.sh --boot MySSID MyPassword # same, plus reconnect at every boot
+sh config.sh                          # interactive prompts
+```
+
 That's it — one `kldload` pulls in the PCI front-end and the entire `bhnd`
 bridge chain automatically (see Step 4).
 
