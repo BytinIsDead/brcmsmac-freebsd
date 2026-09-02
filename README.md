@@ -38,6 +38,7 @@ are required at runtime.
 | Guide | Purpose |
 |-------|---------|
 | [`INSTALL.md`](INSTALL.md) | Build the `.ko`, load it, connect to Wi-Fi (step-by-step). |
+| [`CONNECT.md`](CONNECT.md) | Quick-reference for connecting to Wi-Fi once the driver is loaded. |
 | [`COMPATIBILITY.md`](COMPATIBILITY.md) | FreeBSD release support matrix and how to match your `/usr/src`. |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | How the port maps to `brcmsmac`; file layout; how artifacts are generated. |
 | [`TESTING.md`](TESTING.md) | How the build is verified upstream and on real hardware. |
