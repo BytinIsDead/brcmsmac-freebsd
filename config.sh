@@ -21,6 +21,8 @@
 #   NO_TUI=1          force plain prompts even on a terminal
 
 set -u
+HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/lib.sh"
 
 MODE="once"
 WPA_CONF=""
@@ -64,7 +66,7 @@ while [ $# -gt 0 ]; do
 done
 
 # --- helpers ------------------------------------------------------------------
-# msg: in TUI mode show a box; otherwise print.  die: same, then exit 1.
+# msg/die: TUI-aware; in TUI mode they render boxes, otherwise plain text.
 msg() {
     if [ "$TUI" = "1" ]; then
         dialog --title "BCM4313 wifi" --msgbox "$1" 8 60
@@ -82,25 +84,9 @@ die() {
 }
 
 # --- sanity checks -----------------------------------------------------------
-case "$(uname -s 2>/dev/null)" in
-FreeBSD) ;;
-*)
-    echo "ERROR: this driver only runs on FreeBSD." >&2
-    echo "       (this host reports: $(uname -s) $(uname -r 2>/dev/null))" >&2
-    exit 1
-    ;;
-esac
-
-[ "$(id -u)" = "0" ] || {
-    echo "ERROR: config must run as root (ifconfig/dhclient need it)." >&2
-    echo "       Try: sudo sh $0" >&2
-    exit 1
-}
-
-if ! kldstat -q -m if_bcm4313; then
-    echo "ERROR: if_bcm4313 is not loaded. Run 'sh install.sh' first." >&2
-    exit 1
-fi
+fb_sane_os
+fb_sane_root
+fb_require_driver
 
 # Enable the TUI only when nothing was given on the command line and we are on
 # a real terminal with dialog available (dialog(1) ships with FreeBSD base).
@@ -111,10 +97,7 @@ if [ -z "$SSID" ] && [ -z "$WPA_CONF" ] && [ -z "${NO_TUI:-}" ] &&
 fi
 
 # --- find the net80211 device -------------------------------------------------
-WLDEV="${WLDEV:-}"
-if [ -z "$WLDEV" ]; then
-    WLDEV="$(sysctl -n net.wlan.devices 2>/dev/null | tr ' ' '\n' | grep '^bcm4313' | head -1)"
-fi
+WLDEV="$(fb_find_wldev)"
 [ -n "$WLDEV" ] || die "no bcm4313* device in: $(sysctl -n net.wlan.devices 2>/dev/null) -- attach failed; check: dmesg | tail -20 (or: sh diag.sh)"
 
 # --- (re)create the wlan interface --------------------------------------------

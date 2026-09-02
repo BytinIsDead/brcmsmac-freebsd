@@ -24,6 +24,8 @@
 # dependencies when the driver loads.
 
 set -u
+HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/lib.sh"
 
 SKIP_BUILD=0
 MODE="install"
@@ -39,45 +41,21 @@ for a in "$@"; do
     esac
 done
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
 WLDEV="${WLDEV:-}"
 WLANIF="${WLANIF:-wlan0}"
 
 # --- sanity checks ----------------------------------------------------------
-case "$(uname -s 2>/dev/null)" in
-FreeBSD) ;;
-*)
-    echo "ERROR: this driver only runs on FreeBSD." >&2
-    echo "       (this host reports: $(uname -s) $(uname -r 2>/dev/null))" >&2
-    exit 1
-    ;;
-esac
-
-[ "$(id -u)" = "0" ] || {
-    echo "ERROR: install must run as root (kldload/kldunload need it)." >&2
-    echo "       Try: sudo sh $0" >&2
-    exit 1
-}
-
-[ -f "$HERE/if_bcm4313.c" ] || {
-    echo "ERROR: run install.sh from the driver directory (could not find" >&2
-    echo "       if_bcm4313.c next to $0)." >&2
-    exit 1
-}
+fb_sane_os
+fb_sane_root
+fb_require_tree   # sets HERE
 
 # --- build (unless told to keep the existing .ko) ----------------------------
 if [ "$SKIP_BUILD" = "1" ]; then
-    [ -f "$HERE/if_bcm4313.ko" ] || {
-        echo "ERROR: --skip-build given but $HERE/if_bcm4313.ko is missing." >&2
-        exit 1
-    }
-    echo "==> skipping build (--skip-build), using existing if_bcm4313.ko"
+    [ -f "$HERE/if_bcm4313.ko" ] || fb_die "--skip-build given but $HERE/if_bcm4313.ko is missing."
+    fb_note "skipping build (--skip-build), using existing if_bcm4313.ko"
 else
-    echo "==> building (sh build.sh install)"
-    ( cd "$HERE" && sh build.sh install ) || {
-        echo "ERROR: build/install failed; nothing was loaded." >&2
-        exit 1
-    }
+    fb_note "building (sh build.sh install)"
+    ( cd "$HERE" && sh build.sh install ) || fb_die "build/install failed; nothing was loaded."
 fi
 
 # --- redundant: verify the build actually produced a fresh module -------------
@@ -92,10 +70,7 @@ newest="$(ls -t "$HERE"/*.c "$HERE"/*.h 2>/dev/null | head -1)"
 if [ -n "$newest" ] && [ "$newest" -nt "$HERE/if_bcm4313.ko" ] 2>/dev/null; then
     echo "WARNING: if_bcm4313.ko is older than $newest -- source changed after" >&2
     echo "         the last build. Rebuilding now to be safe." >&2
-    ( cd "$HERE" && sh build.sh install ) || {
-        echo "ERROR: rebuild after freshness check failed." >&2
-        exit 1
-    }
+    ( cd "$HERE" && sh build.sh install ) || fb_die "rebuild after freshness check failed."
 fi
 
 # --- tear down any stale state from a previous load --------------------------
@@ -106,21 +81,9 @@ PCISEL=""
 if kldstat -q -m if_bcm4313; then
     # Remember the PCI selector while our front-end is still attached, so the
     # card can be reset at the bus level after the unload (see below).
-    PCISEL="$(pciconf -l 2>/dev/null | awk '/bcm4313_pci/{sub(/@.*/, "", $1); print $1; exit}')"
-    for i in $(ifconfig -g wlan 2>/dev/null); do
-        p="$(ifconfig "$i" wlandev 2>/dev/null)"
-        [ -n "$p" ] || p="$(ifconfig "$i" 2>/dev/null | awk '/parent interface|wlandev/{print $NF; exit}')"
-        p="${p##* }"   # tolerate "wlandev bcm43130"-style getter output
-        [ -n "$p" ] || continue
-        case "$p" in
-        bcm4313*)
-            ifconfig "$i" down 2>/dev/null
-            ifconfig "$i" destroy 2>/dev/null
-            echo "==> destroyed stale $i over $p"
-            ;;
-        esac
-    done
-    echo "==> unloading old if_bcm4313"
+    PCISEL="$(fb_pci_selector)"
+    fb_destroy_wlans_over 'bcm4313*'
+    fb_note "unloading old if_bcm4313"
     kldunload if_bcm4313 || {
         echo "ERROR: could not unload if_bcm4313." >&2
         echo "       Destroy remaining wlan interfaces over it:" >&2
@@ -130,7 +93,7 @@ if kldstat -q -m if_bcm4313; then
     sleep 1
     # --- redundant: kldunload can exit 0 while the module lingers (refs) -----
     if kldstat -q -m if_bcm4313; then
-        echo "WARNING: if_bcm4313 still listed after unload; retrying once..." >&2
+        fb_warn "if_bcm4313 still listed after unload; retrying once..."
         sleep 2
         kldunload if_bcm4313 2>/dev/null || {
             echo "ERROR: module is still pinned. What holds it?" >&2
@@ -144,13 +107,7 @@ fi
 # The D11's DMP/DMA state survives kldunload: if a previous session crashed
 # the core ("BCMA_DMP_RESETSTATUS timeout"), the next driver just retries
 # resets against the same wedge.  A PCI-level reset clears the hardware.
-if [ -n "$PCISEL" ] && command -v devctl >/dev/null 2>&1; then
-    echo "==> PCI reset of $PCISEL (clears stale DMP/DMA state)"
-    devctl reset "$PCISEL" 2>/dev/null || {
-        echo "    devctl reset failed -- a reboot clears the same state" >&2
-    }
-    sleep 1
-fi
+fb_pci_reset "$PCISEL"
 
 # --- load --------------------------------------------------------------------
 # Prefer the kldinstall location, fall back to the tree's own .ko -- never
@@ -159,30 +116,18 @@ KO=""
 for c in /boot/modules/if_bcm4313.ko /boot/kernel/if_bcm4313.ko "$HERE/if_bcm4313.ko"; do
     [ -f "$c" ] && KO="$c" && break
 done
-[ -n "$KO" ] || {
-    echo "ERROR: no if_bcm4313.ko found (looked in /boot/modules, /boot/kernel, $HERE)." >&2
-    exit 1
-}
-echo "==> kldload $KO"
-kldload if_bcm4313 || {
-    echo "ERROR: kldload failed." >&2
-    echo "       Diagnose with: dmesg | tail -30" >&2
-    exit 1
-}
+[ -n "$KO" ] || fb_die "no if_bcm4313.ko found (looked in /boot/modules, /boot/kernel, $HERE)."
+fb_note "kldload $KO"
+kldload if_bcm4313 || fb_die "kldload failed. Diagnose with: dmesg | tail -30"
 sleep 1
 
 # --- redundant: confirm the module is really loaded ---------------------------
-if ! kldstat -q -m if_bcm4313; then
-    echo "ERROR: kldload reported success but the module is not in kldstat." >&2
-    exit 1
-fi
+kldstat -q -m if_bcm4313 || fb_die "kldload reported success but the module is not in kldstat."
 
 # --- find the net80211 device, with one attach retry -------------------------
 attempt=0
 while [ "$attempt" -lt 2 ]; do
-    if [ -z "$WLDEV" ]; then
-        WLDEV="$(sysctl -n net.wlan.devices 2>/dev/null | tr ' ' '\n' | grep '^bcm4313' | head -1)"
-    fi
+    WLDEV="$(fb_find_wldev)"
     [ -n "$WLDEV" ] && break
     echo "==> bcm43130 not attached yet; reloading and waiting (attempt $((attempt + 1))/2)..."
     kldunload if_bcm4313 2>/dev/null
@@ -202,14 +147,9 @@ echo "==> using wireless device: $WLDEV"
 # --- wifi steps ---------------------------------------------------------------
 echo "==> creating $WLANIF over $WLDEV"
 ifconfig "$WLANIF" destroy 2>/dev/null   # drop a stale copy, if any
-ifconfig "$WLANIF" create wlandev "$WLDEV" || {
-    echo "ERROR: could not create $WLANIF over $WLDEV" >&2
-    exit 1
-}
+ifconfig "$WLANIF" create wlandev "$WLDEV" || fb_die "could not create $WLANIF over $WLDEV"
 # --- redundant: make sure the vap is really bound to OUR card ---------------
-parent="$(ifconfig "$WLANIF" wlandev 2>/dev/null)"
-[ -n "$parent" ] || parent="$(ifconfig "$WLANIF" 2>/dev/null | awk '/parent interface|wlandev/{print $NF; exit}')"
-parent="${parent##* }"   # tolerate "wlandev bcm43130"-style getter output
+parent="$(fb_if_parent "$WLANIF")"
 case "$parent" in
 bcm4313*)
     ;;
@@ -222,17 +162,9 @@ bcm4313*)
 esac
 
 echo "==> bringing $WLANIF up"
-ifconfig "$WLANIF" up || {
-    echo "ERROR: could not bring $WLANIF up" >&2
-    echo "       Diagnose with: dmesg | tail -30" >&2
-    exit 1
-}
+ifconfig "$WLANIF" up || fb_die "could not bring $WLANIF up. Diagnose with: dmesg | tail -30"
 # --- redundant: flags must actually show UP after the command returned ------
-ifconfig "$WLANIF" 2>/dev/null | grep -q '<UP' || {
-    echo "ERROR: $WLANIF up returned 0 but the interface is not UP." >&2
-    echo "       Diagnose with: dmesg | tail -30" >&2
-    exit 1
-}
+fb_if_is_up "$WLANIF" || fb_die "$WLANIF up returned 0 but the interface is not UP. Diagnose with: dmesg | tail -30"
 
 echo "==> MAC address: $(ifconfig "$WLANIF" | awk '/ether/{print $2}')"
 
@@ -241,24 +173,23 @@ ifconfig "$WLANIF" scan >/dev/null 2>&1
 sleep 3
 echo
 echo "==> networks found:"
-found="$(ifconfig "$WLANIF" list scan 2>/dev/null | awk '$2 ~ /:/{c++} END{print c+0}')"
 ifconfig "$WLANIF" list scan 2>/dev/null | head -20
 echo
-echo "    ($found network(s) in range -- an empty result is okay if no AP is near)"
+echo "    ($(fb_scan_count "$WLANIF") network(s) in range -- an empty result is okay if no AP is near)"
 echo
 
 # --- summary -----------------------------------------------------------------
 echo "==> final self-check:"
-kldstat -q -m if_bcm4313 && echo "   [ok] module if_bcm4313 loaded" || echo "   [FAIL] module not loaded"
+kldstat -q -m if_bcm4313 && fb_ok "module if_bcm4313 loaded" || fb_fail "module not loaded"
 if sysctl -n net.wlan.devices 2>/dev/null | grep -q '^bcm4313'; then
-    echo "   [ok] device $WLDEV attached"
+    fb_ok "device $WLDEV attached"
 else
-    echo "   [FAIL] no bcm4313* in: $(sysctl -n net.wlan.devices 2>/dev/null)"
+    fb_fail "no bcm4313* in: $(sysctl -n net.wlan.devices 2>/dev/null)"
 fi
-if ifconfig "$WLANIF" 2>/dev/null | grep -q '<UP'; then
-    echo "   [ok] $WLANIF is up"
+if fb_if_is_up "$WLANIF"; then
+    fb_ok "$WLANIF is up"
 else
-    echo "   [FAIL] $WLANIF not UP"
+    fb_fail "$WLANIF not UP"
 fi
 echo
 echo "Driver is live. To join a network now:"

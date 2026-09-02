@@ -17,6 +17,8 @@
 #   KERNBUILDDIR=/usr/obj/usr/src/amd64.amd64/sys/MYKERNEL sh build.sh
 
 set -u
+HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/lib.sh"
 
 # --- defaults -------------------------------------------------------------
 SYSDIR="${SYSDIR:-/usr/src/sys}"
@@ -24,15 +26,7 @@ JOBS="${JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || echo 2)}"
 MODE="${1:-build}"
 
 # --- sanity checks ----------------------------------------------------------
-case "$(uname -s 2>/dev/null)" in
-FreeBSD) ;;
-*)
-    echo "ERROR: this driver only builds on FreeBSD." >&2
-    echo "       (this host reports: $(uname -s) $(uname -r 2>/dev/null))" >&2
-    echo "       Copy the repo to a FreeBSD 14.x/15.x machine and rerun." >&2
-    exit 1
-    ;;
-esac
+fb_sane_os
 
 [ -d "$SYSDIR" ] || {
     echo "ERROR: kernel source not found at $SYSDIR" >&2
@@ -75,6 +69,7 @@ debug)
     make $MAKEARGS -j"$JOBS" CFLAGS+=-DBCM4313_DEBUG DEBUG_FLAGS=-g depend all || exit 1
     ;;
 install)
+    fb_sane_root   # kldinstall writes /boot/modules
     echo "==> make (default)"
     make $MAKEARGS -j"$JOBS" depend all || exit 1
     echo "==> make install (kldinstall into /boot/kernel)"

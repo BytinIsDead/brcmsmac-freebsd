@@ -2,6 +2,14 @@
 # diag.sh -- collect a labeled bring-up report for if_bcm4313 on FreeBSD.
 # Usage (as root):  sh diag.sh
 # Paste the entire output back into your report.
+
+set -u
+HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/lib.sh"
+
+fb_sane_os
+fb_require_driver
+
 echo "===== uname ====="
 uname -a
 uname -U
