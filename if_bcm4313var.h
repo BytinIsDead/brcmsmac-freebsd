@@ -840,6 +840,14 @@ struct bcm4313_softc {
 	uint32_t		sc_rxnobuf;
 	uint32_t		sc_txnobuf;
 	uint32_t		sc_txreclaimed;
+	uint32_t		sc_txframes;	/* frames posted to the DMA TX ring */
+	uint32_t		sc_rxframes;	/* frames delivered to net80211 */
+	uint32_t		sc_txdone;	/* tx statuses harvested */
+	uint32_t		sc_wdog_fires;	/* watchdog resets + PSM watchdog events */
+
+	/* dev.bcm4313.X.* tunables / diagnostics */
+	int			sc_debug;	/* 0=quiet 1=scan 2=+channel hops */
+	char			sc_fwinfo[96];	/* "fwinfo" string (built at attach) */
 };
 
 /* Per-VAP driver state (net80211 state changes are per-VAP). */

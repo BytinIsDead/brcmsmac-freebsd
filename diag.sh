@@ -40,6 +40,9 @@ echo
 echo "===== net80211 registered devices ====="
 sysctl net.wlan.devices 2>&1
 echo
+echo "===== driver sysctls (dev.bcm4313.*) ====="
+sysctl -a 2>&1 | grep '^dev.bcm4313' || echo "(none -- module predates the sysctl build)"
+echo
 echo "===== kernel messages: bcm/wlan/bhnd/pci ====="
 dmesg 2>&1 | grep -iE "bcm4313|bcm|bhnd|wlan|d11|pci" | tail -40
 echo

@@ -191,6 +191,20 @@ if fb_if_is_up "$WLANIF"; then
 else
     fb_fail "$WLANIF not UP"
 fi
+if pciconf -ll 2>/dev/null | grep -q 'bcm4313'; then
+    fb_ok "PCI front-end bound: $(pciconf -ll 2>/dev/null | grep 'bcm4313' | head -1 | tr -s ' ')"
+else
+    fb_warn "pciconf shows no bcm4313 front-end (devctl reset may have detached it; rerun)"
+fi
+echo
+if sysctl -a 2>/dev/null | grep -q '^dev.bcm4313'; then
+    echo "==> driver diagnostics (dev.bcm4313.*):"
+    sysctl -a 2>/dev/null | grep '^dev.bcm4313' | sed 's/^/   /'
+    echo "   hint: txframes/rxframes/txdone move only while the radio is up;"
+    echo "         if rxframes stays 0 during a scan, the RX path is dead."
+else
+    fb_warn "no dev.bcm4313 sysctls (module predates this build? re-run without --skip-build)"
+fi
 echo
 echo "Driver is live. To join a network now:"
 echo "    ifconfig $WLANIF ssid YOUR_SSID wpakey YOUR_PASSWORD"

@@ -253,8 +253,28 @@ Now `service netif restart` (or a reboot) brings up Wi-Fi by itself.
 | `ifconfig wlan0 scan` finds no networks (attach itself is clean) | The D11 MAC is filtering beacons by BSSID during the scan | Old build: `scan_start`/`scan_end` were no-ops, so the MAC's RCM BSSID filter dropped every beacon not matching the currently programmed BSSID. Fixed in current code: `scan_start` sets `MCTL_BCNS_PROMISC` (0x00100000 — the same bit bwn's `bwn_scan_start` sets and brcmsmac raises for `FIF_BCN_PRBRESP_PROMISC`) and `scan_end` clears it. | `git pull` and rebuild. If still nothing, run `dmesg | tail -30` after `scan` — the next suspects are probe-request TX status handling and RX DMA. |
 | `ifconfig` shows nothing | The interface is simply down | Plain `ifconfig` hides down interfaces — use `ifconfig -a`. The base device is named `bcm43130` (from the module name), then `ifconfig wlan0 create wlandev bcm43130`. |
 | `ifconfig` has no `wlan` | `wlan(4)` missing | Built into GENERIC; only a custom kernel without `device wlan` needs `kldload wlan`. |
-| Loads but Wi-Fi is flaky | Usually SPROM/tuning issues | Set `sysctl hw.bcm4313.debug=1` (needs a debug build) and collect `dmesg` output for a report. |
+| Loads but Wi-Fi is flaky | Usually SPROM/tuning issues | Set `sysctl dev.bcm4313.0.debug=2` (runtime, no rebuild) and collect `dmesg` output for a report. |
 | **No attach at all** | Chip isn't BCM4313 | If it's a BCM943142HM/BCM43142 (FullMAC), this softMAC driver can't drive it — see the note at the top. |
+
+## Driver diagnostics (`dev.bcm4313.*`)
+
+Runtime sysctls on the device node, no debug build needed:
+
+| sysctl | meaning |
+|---|---|
+| `dev.bcm4313.0.debug` | `0` quiet (default), `1` logs scan start/end, `2` also logs every channel hop |
+| `dev.bcm4313.0.fwinfo` | chip/PHY/radio identity read from SPROM at attach |
+| `dev.bcm4313.0.txframes` | frames posted to the DMA TX ring |
+| `dev.bcm4313.0.rxframes` | frames actually delivered to net80211 |
+| `dev.bcm4313.0.txdone` | TX statuses harvested from the status ring |
+| `dev.bcm4313.0.wdogfires` | watchdog resets + PSM watchdog events |
+| `dev.bcm4313.0.dmatx` / `dmarx` / `dmatxstatus` | live ring producer/consumer positions |
+| `dev.bcm4313.0.intrmask` | current MAC interrupt mask |
+
+Bring the interface up, then: `rxframes` must climb as beacons arrive during a
+scan, and `txdone` should track `txframes` once TX is moving. If `rxframes`
+stays at 0 while scanning, the RX path is dead — that alone tells you which
+side to debug.
 
 Still stuck? Grab everything at once and paste it in your report:
 
@@ -266,9 +286,10 @@ kldstat -m if_bcm4313; kldstat -m bhnd; echo ---; \
 
 ## For developers
 
-- **Enable debug prints:** compile with `-DBCM4313_DEBUG` (or uncomment
-  `#define BCM4313_DEBUG 1` in `opt_bcm4313.h`), then
-  `sysctl hw.bcm4313.debug=1`.
+- **Runtime debug prints:** `sysctl dev.bcm4313.0.debug=2` logs scan
+  start/end and every channel hop; no rebuild needed. The compile-time
+  `-DBCM4313_DEBUG` option (or `#define BCM4313_DEBUG 1` in `opt_bcm4313.h`)
+  still adds per-frame debug (txstatus details) on top.
 - **Regenerate the embedded tables/microcode** from the bundled sources:
 
   ```sh

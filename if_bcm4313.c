@@ -49,6 +49,7 @@
 #include <sys/mutex.h>
 #include <sys/rman.h>
 #include <sys/socket.h>
+#include <sys/sysctl.h>
 #include <sys/sockio.h>
 #include <sys/taskqueue.h>
 
@@ -98,6 +99,7 @@ static void	bcm4313_rx_refill(struct bcm4313_softc *, struct bcm4313_ring *);
 static void	bcm4313_tx_reclaim(struct bcm4313_softc *,
 		    struct bcm4313_ring *, int);
 static void	bcm4313_init_locked(struct bcm4313_softc *);
+static void	bcm4313_sysctl_setup(struct bcm4313_softc *);
 static void	bcm4313_stop_locked(struct bcm4313_softc *);
 static int	bcm4313_detach(device_t);
 static int	bcm4313_ucode_download(struct bcm4313_softc *);
@@ -698,6 +700,7 @@ bcm4313_rx_harvest(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 			 * wlc_lcnphy_rx_signal_strength().
 			 */
 			rssi = -(int)((rxs2 & BCM4313_PRXS2_HTPHY_RXPWR_ANT0) >> 8);
+			sc->sc_rxframes++;
 			/*
 			 * Deliver to net80211 without the softc lock held:
 			 * ieee80211_input() may call back into the driver
@@ -758,6 +761,7 @@ bcm4313_txstatus_harvest(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 			}
 			#endif
 			m_freem(m);
+			sc->sc_txdone++;
 		}
 		ring->r_in = (ring->r_in + 1) % ring->r_nslots;
 	}
@@ -933,6 +937,7 @@ bcm4313_tx_start_locked(struct bcm4313_softc *sc, struct ieee80211_node *ni,
 	bcm4313_write_4(sc, ring->r_base + BCM4313_DMA64_PTR,
 	    ring->r_out * sizeof(struct bcm4313_dma64desc));
 	sc->sc_watchdog_timer = 5;
+	sc->sc_txframes++;
 	return (0);
 }
 
@@ -1305,6 +1310,8 @@ bcm4313_scan_start(struct ieee80211com *ic)
 	}
 	BCM4313_UNLOCK(sc);
 	BCM4313_DPRINTF(sc, "scan start\n");
+	if (sc->sc_debug > 0)
+		device_printf(sc->sc_dev, "scan start\n");
 }
 
 static void
@@ -1319,6 +1326,8 @@ bcm4313_scan_end(struct ieee80211com *ic)
 	}
 	BCM4313_UNLOCK(sc);
 	BCM4313_DPRINTF(sc, "scan end\n");
+	if (sc->sc_debug > 0)
+		device_printf(sc->sc_dev, "scan end\n");
 }
 
 static void
@@ -1352,6 +1361,8 @@ bcm4313_set_channel(struct ieee80211com *ic)
 	bcm4313_shm_write_2(sc, BCM4313_M_CURCHANNEL, chan);
 	bcm4313_lcnphy_set_chanspec(sc, chan);
 	BCM4313_UNLOCK(sc);
+	if (sc->sc_debug >= 2)
+		device_printf(sc->sc_dev, "chan %u\n", chan);
 }
 
 static void
@@ -1515,6 +1526,7 @@ bcm4313_intrtask(void *arg, int pending)
 		sc->sc_watchdog_timer = 5;
 	}
 	if (reason & BCM4313_MI_GP0) {
+		sc->sc_wdog_fires++;
 		/*
 		 * D11 PSM microcode watchdog; brcmsmac treats MI_GP0 as fatal
 		 * (brcms_fatal_error -> full restart).  Deliberately do NOT feed
@@ -1546,6 +1558,7 @@ bcm4313_watchdog(void *arg)
 	BCM4313_LOCK(sc);
 	if (sc->sc_flags & BCM4313_FLAG_RUNNING) {
 		if (--sc->sc_watchdog_timer <= 0) {
+			sc->sc_wdog_fires++;
 			uint32_t mc;
 
 			device_printf(sc->sc_dev,
@@ -1718,6 +1731,70 @@ bcm4313_probe(device_t dev)
 		return (ENXIO);
 	bhnd_set_default_core_desc(dev);
 	return (BUS_PROBE_DEFAULT);
+}
+
+/*
+ * Register dev.bcm4313.X.* diagnostics on the device tree (the same
+ * approach bwn(4) uses; mirrors the sibling brcmfmac port's sysctls).
+ * Hot-path counters are the first place to look when scan/assoc
+ * misbehaves:
+ *   txframes - frames posted to the DMA TX ring
+ *   rxframes - frames delivered to net80211
+ *   txdone   - tx statuses drained from the status ring
+ *   wdogfires- watchdog resets + PSM watchdog events
+ *   dma{tx,rx,txstatus} - live ring producer/consumer positions
+ */
+static void
+bcm4313_sysctl_setup(struct bcm4313_softc *sc)
+{
+	struct sysctl_ctx_list *ctx;
+	struct sysctl_oid *root;
+
+	ctx = device_get_sysctl_ctx(sc->sc_dev);
+	root = device_get_sysctl_tree(sc->sc_dev);
+
+	SYSCTL_ADD_STRING(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "fwinfo", CTLFLAG_RD, sc->sc_fwinfo, 0,
+	    "Chip / PHY / radio identity");
+	SYSCTL_ADD_INT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "debug", CTLFLAG_RW, &sc->sc_debug, 0,
+	    "Log verbosity: 0 off, 1 scan start/end, 2 +channel hops");
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "intrmask", CTLFLAG_RD, &sc->sc_intr_mask, 0,
+	    "Current MAC interrupt mask");
+	SYSCTL_ADD_INT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "dmatx", CTLFLAG_RD, &sc->sc_tx.r_out, 0,
+	    "TX ring producer position");
+	SYSCTL_ADD_INT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "dmarx", CTLFLAG_RD, &sc->sc_rx.r_in, 0,
+	    "RX ring consumer position");
+	SYSCTL_ADD_INT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "dmatxstatus", CTLFLAG_RD, &sc->sc_txstatus.r_in, 0,
+	    "TX-status ring consumer position");
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "txframes", CTLFLAG_RD, &sc->sc_txframes, 0,
+	    "Frames posted to the DMA TX ring");
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "rxframes", CTLFLAG_RD, &sc->sc_rxframes, 0,
+	    "Frames delivered to net80211");
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "txdone", CTLFLAG_RD, &sc->sc_txdone, 0,
+	    "TX statuses harvested");
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "wdogfires", CTLFLAG_RD, &sc->sc_wdog_fires, 0,
+	    "Watchdog resets + PSM watchdog events");
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "txreclaimed", CTLFLAG_RD, &sc->sc_txreclaimed, 0,
+	    "TX frames reclaimed");
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "txnobuf", CTLFLAG_RD, &sc->sc_txnobuf, 0,
+	    "TX ring full / no-buffer drops");
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "rxnobuf", CTLFLAG_RD, &sc->sc_rxnobuf, 0,
+	    "RX refill no-buffer drops");
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "rxgiants", CTLFLAG_RD, &sc->sc_rxgiants, 0,
+	    "Oversized RX frames dropped");
 }
 
 static int
@@ -2030,6 +2107,14 @@ bcm4313_attach(device_t dev)
 	    sc->sc_phy_type, sc->sc_phy_rev, sc->sc_phy_analog,
 	    sc->sc_radio_id, sc->sc_board.board_flags,
 	    sc->sc_board.board_rev);
+
+	snprintf(sc->sc_fwinfo, sizeof(sc->sc_fwinfo),
+	    "%s rev %u sromrev %u PHY %u/%u/%u radio %#x board %#x/%#x",
+	    chip_name, bhnd_get_hwrev(dev), sc->sc_board.board_srom_rev,
+	    sc->sc_phy_type, sc->sc_phy_rev, sc->sc_phy_analog,
+	    sc->sc_radio_id, sc->sc_board.board_flags,
+	    sc->sc_board.board_rev);
+	bcm4313_sysctl_setup(sc);
 
 	return (0);
 fail:
