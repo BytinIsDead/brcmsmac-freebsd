@@ -80,6 +80,24 @@ else
     }
 fi
 
+# --- redundant: verify the build actually produced a fresh module -------------
+# `make` can exit 0 without a usable .ko; also catch cases where kldinstall
+# silently wrote nothing or the tree was never rebuilt.
+if [ ! -s "$HERE/if_bcm4313.ko" ]; then
+    echo "ERROR: build finished but $HERE/if_bcm4313.ko is missing or empty." >&2
+    echo "       Rerun: sh build.sh   (check the make output above)" >&2
+    exit 1
+fi
+newest="$(ls -t "$HERE"/*.c "$HERE"/*.h 2>/dev/null | head -1)"
+if [ -n "$newest" ] && [ "$newest" -nt "$HERE/if_bcm4313.ko" ] 2>/dev/null; then
+    echo "WARNING: if_bcm4313.ko is older than $newest -- source changed after" >&2
+    echo "         the last build. Rebuilding now to be safe." >&2
+    ( cd "$HERE" && sh build.sh install ) || {
+        echo "ERROR: rebuild after freshness check failed." >&2
+        exit 1
+    }
+fi
+
 # --- tear down any stale state from a previous load --------------------------
 # A loaded module cannot be unloaded while a wlan(4) interface still rides on
 # it (net80211 holds a reference).  So first destroy every wlan interface over
@@ -92,6 +110,7 @@ if kldstat -q -m if_bcm4313; then
     for i in $(ifconfig -g wlan 2>/dev/null); do
         p="$(ifconfig "$i" wlandev 2>/dev/null)"
         [ -n "$p" ] || p="$(ifconfig "$i" 2>/dev/null | awk '/parent interface|wlandev/{print $NF; exit}')"
+        p="${p##* }"   # tolerate "wlandev bcm43130"-style getter output
         [ -n "$p" ] || continue
         case "$p" in
         bcm4313*)
@@ -109,6 +128,16 @@ if kldstat -q -m if_bcm4313; then
         exit 1
     }
     sleep 1
+    # --- redundant: kldunload can exit 0 while the module lingers (refs) -----
+    if kldstat -q -m if_bcm4313; then
+        echo "WARNING: if_bcm4313 still listed after unload; retrying once..." >&2
+        sleep 2
+        kldunload if_bcm4313 2>/dev/null || {
+            echo "ERROR: module is still pinned. What holds it?" >&2
+            echo "       kldstat -m if_bcm4313 ; ifconfig -g wlan" >&2
+            exit 1
+        }
+    fi
 fi
 
 # --- clear a wedged chip before the new module loads --------------------------
@@ -124,7 +153,17 @@ if [ -n "$PCISEL" ] && command -v devctl >/dev/null 2>&1; then
 fi
 
 # --- load --------------------------------------------------------------------
-echo "==> kldload if_bcm4313"
+# Prefer the kldinstall location, fall back to the tree's own .ko -- never
+# load a module that does not exist.
+KO=""
+for c in /boot/modules/if_bcm4313.ko /boot/kernel/if_bcm4313.ko "$HERE/if_bcm4313.ko"; do
+    [ -f "$c" ] && KO="$c" && break
+done
+[ -n "$KO" ] || {
+    echo "ERROR: no if_bcm4313.ko found (looked in /boot/modules, /boot/kernel, $HERE)." >&2
+    exit 1
+}
+echo "==> kldload $KO"
 kldload if_bcm4313 || {
     echo "ERROR: kldload failed." >&2
     echo "       Diagnose with: dmesg | tail -30" >&2
@@ -132,13 +171,30 @@ kldload if_bcm4313 || {
 }
 sleep 1
 
-# --- find the net80211 device -------------------------------------------------
-if [ -z "$WLDEV" ]; then
-    WLDEV="$(sysctl -n net.wlan.devices 2>/dev/null | tr ' ' '\n' | grep '^bcm4313' | head -1)"
+# --- redundant: confirm the module is really loaded ---------------------------
+if ! kldstat -q -m if_bcm4313; then
+    echo "ERROR: kldload reported success but the module is not in kldstat." >&2
+    exit 1
 fi
+
+# --- find the net80211 device, with one attach retry -------------------------
+attempt=0
+while [ "$attempt" -lt 2 ]; do
+    if [ -z "$WLDEV" ]; then
+        WLDEV="$(sysctl -n net.wlan.devices 2>/dev/null | tr ' ' '\n' | grep '^bcm4313' | head -1)"
+    fi
+    [ -n "$WLDEV" ] && break
+    echo "==> bcm43130 not attached yet; reloading and waiting (attempt $((attempt + 1))/2)..."
+    kldunload if_bcm4313 2>/dev/null
+    sleep 1
+    kldload if_bcm4313 2>/dev/null
+    sleep 3
+    WLDEV=""
+    attempt=$((attempt + 1))
+done
 [ -n "$WLDEV" ] || {
     echo "ERROR: no bcm4313* device in: $(sysctl -n net.wlan.devices 2>/dev/null)" >&2
-    echo "       Attach failed; check: dmesg | tail -20   (or: sh diag.sh)" >&2
+    echo "       Attach failed after 2 attempts; check: dmesg | tail -20   (or: sh diag.sh)" >&2
     exit 1
 }
 echo "==> using wireless device: $WLDEV"
@@ -150,10 +206,30 @@ ifconfig "$WLANIF" create wlandev "$WLDEV" || {
     echo "ERROR: could not create $WLANIF over $WLDEV" >&2
     exit 1
 }
+# --- redundant: make sure the vap is really bound to OUR card ---------------
+parent="$(ifconfig "$WLANIF" wlandev 2>/dev/null)"
+[ -n "$parent" ] || parent="$(ifconfig "$WLANIF" 2>/dev/null | awk '/parent interface|wlandev/{print $NF; exit}')"
+parent="${parent##* }"   # tolerate "wlandev bcm43130"-style getter output
+case "$parent" in
+bcm4313*)
+    ;;
+*)
+    echo "ERROR: $WLANIF was created but is bound to '${parent:-nothing}' instead of" >&2
+    echo "       $WLDEV. Destroying it and aborting." >&2
+    ifconfig "$WLANIF" destroy 2>/dev/null
+    exit 1
+    ;;
+esac
 
 echo "==> bringing $WLANIF up"
 ifconfig "$WLANIF" up || {
     echo "ERROR: could not bring $WLANIF up" >&2
+    echo "       Diagnose with: dmesg | tail -30" >&2
+    exit 1
+}
+# --- redundant: flags must actually show UP after the command returned ------
+ifconfig "$WLANIF" 2>/dev/null | grep -q '<UP' || {
+    echo "ERROR: $WLANIF up returned 0 but the interface is not UP." >&2
     echo "       Diagnose with: dmesg | tail -30" >&2
     exit 1
 }
@@ -165,10 +241,26 @@ ifconfig "$WLANIF" scan >/dev/null 2>&1
 sleep 3
 echo
 echo "==> networks found:"
+found="$(ifconfig "$WLANIF" list scan 2>/dev/null | awk '$2 ~ /:/{c++} END{print c+0}')"
 ifconfig "$WLANIF" list scan 2>/dev/null | head -20
+echo
+echo "    ($found network(s) in range -- an empty result is okay if no AP is near)"
 echo
 
 # --- summary -----------------------------------------------------------------
+echo "==> final self-check:"
+kldstat -q -m if_bcm4313 && echo "   [ok] module if_bcm4313 loaded" || echo "   [FAIL] module not loaded"
+if sysctl -n net.wlan.devices 2>/dev/null | grep -q '^bcm4313'; then
+    echo "   [ok] device $WLDEV attached"
+else
+    echo "   [FAIL] no bcm4313* in: $(sysctl -n net.wlan.devices 2>/dev/null)"
+fi
+if ifconfig "$WLANIF" 2>/dev/null | grep -q '<UP'; then
+    echo "   [ok] $WLANIF is up"
+else
+    echo "   [FAIL] $WLANIF not UP"
+fi
+echo
 echo "Driver is live. To join a network now:"
 echo "    ifconfig $WLANIF ssid YOUR_SSID wpakey YOUR_PASSWORD"
 echo "    dhclient $WLANIF          # or: dhcpcd $WLANIF"
