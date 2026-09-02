@@ -259,6 +259,15 @@ MALLOC_DECLARE(M_BCM4313);
 #define	BCM4313_D64_RC_PD		0x00000800 /* parity check disable */
 #define	BCM4313_D64_RC_AE		0x00030000 /* addr ext bits */
 
+/* dma64 status0 state fields (brcmsmac dma.c). */
+#define	BCM4313_D64_XS0_XS_MASK		0xf0000000 /* tx state */
+#define	BCM4313_D64_XS0_XS_DISABLED	0x00000000
+#define	BCM4313_D64_XS0_XS_ACTIVE	0x10000000
+#define	BCM4313_D64_XS0_XS_IDLE		0x20000000
+#define	BCM4313_D64_XS0_XS_STOPPED	0x30000000
+#define	BCM4313_D64_RS0_RS_MASK		0xf0000000 /* rx state */
+#define	BCM4313_D64_RS0_RS_DISABLED	0x00000000
+
 /* dma64 channel status. */
 #define	BCM4313_D64_XS0_CD_MASK		0x00001fff /* current descriptor */
 #define	BCM4313_D64_XS0_XS_MASK		0xf0000000 /* transmit state */

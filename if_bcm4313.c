@@ -496,8 +496,48 @@ bcm4313_ring_stop(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 {
 	int i;
 
+	/*
+	 * Properly disarm the DMA engine (brcmsmac dma_txreset()/dma_rxreset(),
+	 * invoked from brcms_b_corereset() before every D11 core reset).
+	 * Writing 0 to the control register does NOT stop an engine that is
+	 * mid-transaction: its master stays on the backplane, and the DMP core
+	 * reset that follows can never handshake -- "BCMA_DMP_RESETSTATUS
+	 * timeout", "core reset failed: 60".
+	 *
+	 * TX: raise the suspend request, wait until the engine leaves the
+	 * active states, then clear the enable and wait for DISABLED.  RX:
+	 * clear the enable and wait for DISABLED.  Then let the last backplane
+	 * transaction drain (300us).  Mirrors brcmsmac exactly, including the
+	 * 10k * 1us spinwait bound.
+	 */
+	if (ring->r_tx) {
+		bcm4313_write_4(sc, ring->r_base + BCM4313_DMA64_CTL,
+		    BCM4313_D64_XC_SE);
+		for (i = 0; i < 10000; i++) {
+			uint32_t st = bcm4313_read_4(sc,
+			    ring->r_base + BCM4313_DMA64_STATUS0);
+			st &= BCM4313_D64_XS0_XS_MASK;
+			if (st == BCM4313_D64_XS0_XS_DISABLED ||
+			    st == BCM4313_D64_XS0_XS_IDLE ||
+			    st == BCM4313_D64_XS0_XS_STOPPED)
+				break;
+			DELAY(1);
+		}
+	}
 	bcm4313_write_4(sc, ring->r_base + BCM4313_DMA64_CTL, 0);
-	DELAY(100);
+	for (i = 0; i < 10000; i++) {
+		uint32_t st = bcm4313_read_4(sc,
+		    ring->r_base + BCM4313_DMA64_STATUS0);
+		if (ring->r_tx)
+			st &= BCM4313_D64_XS0_XS_MASK;
+		else
+			st &= BCM4313_D64_RS0_RS_MASK;
+		if (st == (ring->r_tx ? BCM4313_D64_XS0_XS_DISABLED :
+		    BCM4313_D64_RS0_RS_DISABLED))
+			break;
+		DELAY(1);
+	}
+	DELAY(300);
 	if (ring->r_tx) {
 		bcm4313_tx_reclaim(sc, ring, 1);
 		return;
