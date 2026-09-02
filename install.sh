@@ -15,9 +15,13 @@
 #   WLANIF=wlan0               interface to create over WLDEV
 #
 # The driver trades itself in safely: any already-loaded if_bcm4313 is
-# unloaded first, so this can be re-run after `git pull` to upgrade in
-# place.  bhnd/bhndb/bhndb_pci/bcma_bhndb are pulled in automatically as
-# module dependencies when the driver loads.
+# unloaded first (stale wlan interfaces over it are destroyed first, because
+# net80211 pins the module), so this can be re-run after `git pull` to
+# upgrade in place.  If the old session wedged the chip ("core reset
+# failed: 60"), the wedge lives in the hardware and survives kldunload, so
+# the card gets a PCI-level `devctl reset` before the new module loads.
+# bhnd/bhndb/bhndb_pci/bcma_bhndb are pulled in automatically as module
+# dependencies when the driver loads.
 
 set -u
 
@@ -76,14 +80,47 @@ else
     }
 fi
 
-# --- unload any old copy so the new module actually takes effect -------------
+# --- tear down any stale state from a previous load --------------------------
+# A loaded module cannot be unloaded while a wlan(4) interface still rides on
+# it (net80211 holds a reference).  So first destroy every wlan interface over
+# bcm4313*, then unload the old module, then load the new one.
+PCISEL=""
 if kldstat -q -m if_bcm4313; then
+    # Remember the PCI selector while our front-end is still attached, so the
+    # card can be reset at the bus level after the unload (see below).
+    PCISEL="$(pciconf -l 2>/dev/null | awk '/bcm4313_pci/{sub(/@.*/, "", $1); print $1; exit}')"
+    for i in $(ifconfig -g wlan 2>/dev/null); do
+        p="$(ifconfig "$i" wlandev 2>/dev/null)"
+        [ -n "$p" ] || p="$(ifconfig "$i" 2>/dev/null | awk '/parent interface|wlandev/{print $NF; exit}')"
+        [ -n "$p" ] || continue
+        case "$p" in
+        bcm4313*)
+            ifconfig "$i" down 2>/dev/null
+            ifconfig "$i" destroy 2>/dev/null
+            echo "==> destroyed stale $i over $p"
+            ;;
+        esac
+    done
     echo "==> unloading old if_bcm4313"
     kldunload if_bcm4313 || {
-        echo "ERROR: could not unload if_bcm4313. Are its wlan interfaces up?" >&2
-        echo "       Detach them first, e.g.:  ifconfig $WLANIF down && ifconfig $WLANIF destroy" >&2
+        echo "ERROR: could not unload if_bcm4313." >&2
+        echo "       Destroy remaining wlan interfaces over it:" >&2
+        echo "         for i in \$(ifconfig -g wlan); do ifconfig \$i destroy; done" >&2
         exit 1
     }
+    sleep 1
+fi
+
+# --- clear a wedged chip before the new module loads --------------------------
+# The D11's DMP/DMA state survives kldunload: if a previous session crashed
+# the core ("BCMA_DMP_RESETSTATUS timeout"), the next driver just retries
+# resets against the same wedge.  A PCI-level reset clears the hardware.
+if [ -n "$PCISEL" ] && command -v devctl >/dev/null 2>&1; then
+    echo "==> PCI reset of $PCISEL (clears stale DMP/DMA state)"
+    devctl reset "$PCISEL" 2>/dev/null || {
+        echo "    devctl reset failed -- a reboot clears the same state" >&2
+    }
+    sleep 1
 fi
 
 # --- load --------------------------------------------------------------------
