@@ -8,7 +8,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/lib.sh"
 
 fb_sane_os
-fb_require_driver
+fb_ensure_driver
 
 echo "===== uname ====="
 uname -a

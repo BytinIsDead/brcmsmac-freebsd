@@ -86,7 +86,7 @@ die() {
 # --- sanity checks -----------------------------------------------------------
 fb_sane_os
 fb_sane_root
-fb_require_driver
+fb_ensure_driver
 
 # Enable the TUI only when nothing was given on the command line and we are on
 # a real terminal with dialog available (dialog(1) ships with FreeBSD base).

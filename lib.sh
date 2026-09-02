@@ -34,10 +34,43 @@ fb_sane_root() {
     }
 }
 
-# fb_require_driver: the module must be loaded (config.sh, diag.sh).
-fb_require_driver() {
-    kldstat -q -m if_bcm4313 ||
-        fb_die "if_bcm4313 is not loaded. Run 'sh install.sh' first."
+# fb_find_ko: first existing if_bcm4313.ko (kldinstall location, kernel
+# location, then the tree next to this script).  Returns the path or nothing.
+fb_find_ko() {
+    local c
+    for c in /boot/modules/if_bcm4313.ko /boot/kernel/if_bcm4313.ko \
+        "${HERE:-.}/if_bcm4313.ko"; do
+        [ -f "$c" ] && { printf '%s\n' "$c"; return 0; }
+    done
+    return 1
+}
+
+# fb_ensure_driver: if if_bcm4313 is not loaded already, try to load it from
+# disk (config.sh, diag.sh).  Waits a few seconds for the bcm4313* device to
+# attach.  If that fails, dies with the actual evidence -- often the module
+# was loaded on a previous boot that did not persist it, or the last attach
+# failed ("core reset failed") and the dmesg tail shows why.
+fb_ensure_driver() {
+    local i ko
+    kldstat -q -m if_bcm4313 && return 0
+    ko="$(fb_find_ko 2>/dev/null)" || ko=""
+    if [ -n "$ko" ]; then
+        fb_warn "if_bcm4313 is not loaded -- loading $ko"
+        kldload if_bcm4313 2>/dev/null || kldload "$ko" 2>/dev/null || true
+        for i in 1 2 3 4; do
+            sysctl -n net.wlan.devices 2>/dev/null | grep -q '^bcm4313' && break
+            sleep 1
+        done
+    fi
+    kldstat -q -m if_bcm4313 || {
+        echo "ERROR: if_bcm4313 is not loaded${ko:+ (tried: $ko)}." >&2
+        echo "       kldstat -m if_bcm4313:  $(kldstat -m if_bcm4313 2>&1)" >&2
+        echo "       net.wlan.devices:       $(sysctl -n net.wlan.devices 2>/dev/null)" >&2
+        echo "       last bcm4313/bhnd logs: " >&2
+        dmesg 2>/dev/null | grep -iE 'bcm4313|bhnd' | tail -3 | sed 's/^/         /' >&2
+        [ -n "$ko" ] || echo "       No module found on disk -- run 'sh install.sh' first." >&2
+        exit 1
+    }
 }
 
 # fb_require_tree: the caller must run from the driver directory.
