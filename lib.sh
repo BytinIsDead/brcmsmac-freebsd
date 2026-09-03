@@ -90,6 +90,10 @@ fb_ensure_driver() {
         echo "       net.wlan.devices:       $(sysctl -n net.wlan.devices 2>/dev/null)" >&2
         echo "       last bcm4313/bhnd logs: " >&2
         dmesg 2>/dev/null | grep -iE 'bcm4313|bhnd' | tail -3 | sed 's/^/         /' >&2
+        if dmesg 2>/dev/null | grep -q 'core is dead'; then
+            echo "       The driver latched a dead D11 core (DMA fault flood)." >&2
+            echo "       Reload it: kldunload if_bcm4313 && kldload $ko" >&2
+        fi
         [ -n "$ko" ] || echo "       No module found on disk -- run 'sh install.sh' first." >&2
         exit 1
     }

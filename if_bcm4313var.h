@@ -832,6 +832,10 @@ struct bcm4313_softc {
 #define	BCM4313_FLAG_ATTACHED	(1 << 0)
 #define	BCM4313_FLAG_RUNNING	(1 << 1)
 #define	BCM4313_FLAG_SCAN	(1 << 2)	/* net80211 scan in progress */
+#define	BCM4313_FLAG_DEAD	(1 << 3)	/* core stopped responding;
+						 * all-ones on register reads.
+						 * Re-up attempts are refused
+						 * (latch, no reset storm). */
 
 	/* radiotap capture (monitor mode) */
 	struct bcm4313_rx_radiotap_header sc_rx_th;
@@ -891,6 +895,9 @@ struct bcm4313_softc {
 	uint32_t		sc_rxframes;	/* frames delivered to net80211 */
 	uint32_t		sc_txdone;	/* tx statuses harvested */
 	uint32_t		sc_wdog_fires;	/* watchdog resets + PSM watchdog events */
+	uint32_t		sc_dmaerr[8];	/* per-FIFO DMA error counts */
+	uint8_t			sc_dmaerr_fifo;	/* FIFO of the last DMA error */
+	uint8_t			sc_dmaerr_bits;	/* latched bits of the last error */
 
 	/* dev.bcm4313.X.* tunables / diagnostics */
 	int			sc_debug;	/* 0=quiet 1=scan 2=+channel hops */

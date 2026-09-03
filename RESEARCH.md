@@ -178,15 +178,30 @@ or **skipped** (with why).
   controllers × 8 bytes from 0x20, d11.h, indexed by FIFO number) for
   `I_PC` (descriptor error), `I_PD` (data error), `I_DE` (descriptor
   protocol error), `I_RO` (RX fifo overflow) and `I_XU` (TX fifo
-  underflow) every watchdog tick, exactly like `brcms_b_fifoerrors()`, and
-  a fault runs the same PSM-halt + `init_locked()` reset as the TX
-  watchdog timeout — with the specific reason logged instead of a bare
-  timeout. `I_RU` (RX descriptor underflow) stays out of the checked set
+  underflow) every watchdog tick, exactly like `brcms_b_fifoerrors()`.
+  `I_RU` (RX descriptor underflow) stays out of the checked set
   (main.h `I_ERRORS` comment). Only the three controllers this driver owns
-  (RX 0, TX-BE 1, TX-status 3) are polled. What hardware will confirm:
-  that a real DMA fault on this D11 rev actually latches these bits in the
-  shared register block (they are read the same way upstream, and they
-  latch independently of the MAC interrupt mask).
+  (RX 0, TX-BE 1, TX-status 3) are polled.
+  Recovery note (revised after the dmesg flood
+  `fifo 0/1/3 × 5 errors → DMA engine error; resetting MAC →
+  BCMA_DMP_RESETSTATUS timeout → core reset failed: 60`): upstream
+  answers a fatal fifo error with a full stop/start (`brcms_fatal_error`),
+  *not* with an inline `init_locked()` from the watchdog. The inline
+  reset ran while the MAC could still force bus transactions, so the DMP
+  handshake could never complete and the card died. The port now mirrors
+  the upstream shape: a fault halts the PSM, drops FLAG_RUNNING and lets
+  the user re-up; `stop_locked()` always disarms the engines
+  (dma_txreset/dma_rxreset ordering) before the next core reset.
+  Additionally, an all-ones register read (core wedged past the bus) is
+  now detected in the ISR, the intrtask and the fifo poll — the same
+  check as `wlc_intstatus()`'s `macintstatus == 0xffffffff` — and latched
+  as FLAG_DEAD: the previous build interpreted that value as "every DMA
+  error at once" and reset-looped into a permanent error 60.
+  Faults are counted per FIFO in `dev.bcm4313.0.dmaerr`. What hardware
+  will confirm: that a real DMA fault on this D11 rev actually latches
+  these bits in the shared register block (they are read the same way
+  upstream, and they latch independently of the MAC interrupt mask), and
+  that a re-up after a fault recovers without a DMP timeout.
 - **Done -- LCN periodic temperature-based TX-power recalibration.** The
   1 Hz `bcm4313_watchdog` now calls `bcm4313_lcnphy_watchdog()`
   (if_bcm4313_phy_lcn.c, mirroring the LCN branch of `wlc_phy_watchdog`,

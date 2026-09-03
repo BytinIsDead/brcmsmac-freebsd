@@ -1479,14 +1479,32 @@ bcm4313_vap_delete(struct ieee80211vap *vap)
  * Interrupts.
  * ---------------------------------------------------------------------------
  */
+/*
+ * The core answers every read with 0xffffffff once it is wedged past the
+ * bus (clock-gated out of reset reach, dead card).  Masked against the
+ * interrupt mask that value still looks like "every interrupt", and each
+ * handler then services those phantom bits, trips the fifo poll, and
+ * orders the very core reset that can never handshake -- the
+ * "DMA fifo N: ...; DMA engine error; resetting MAC; BCMA_DMP_RESETSTATUS
+ * timeout; core reset failed: 60" dmesg flood.  Mirror brcmsmac's
+ * wlc_intstatus(): treat an all-ones macintstatus as "no interrupt".
+ */
+static __inline int
+bcm4313_intstatus_valid(uint32_t is)
+{
+	return (is != 0xffffffff);
+}
+
 static int
 bcm4313_intr(void *arg)
 {
 	struct bcm4313_softc *sc = arg;
 	uint32_t reason;
 
-	reason = bcm4313_read_4(sc, BCM4313_D11_MACINTSTATUS) &
-	    sc->sc_intr_mask;
+	reason = bcm4313_read_4(sc, BCM4313_D11_MACINTSTATUS);
+	if (!bcm4313_intstatus_valid(reason))
+		return (FILTER_STRAY);
+	reason &= sc->sc_intr_mask;
 	if (reason == 0)
 		return (FILTER_STRAY);
 	/* Clear by writing back the read value. */
@@ -1502,8 +1520,10 @@ bcm4313_intrtask(void *arg, int pending)
 	uint32_t reason;
 
 	BCM4313_LOCK(sc);
-	reason = bcm4313_read_4(sc, BCM4313_D11_MACINTSTATUS) &
-	    sc->sc_intr_mask;
+	reason = bcm4313_read_4(sc, BCM4313_D11_MACINTSTATUS);
+	if (!bcm4313_intstatus_valid(reason))
+		reason = 0;
+	reason &= sc->sc_intr_mask;
 	if (reason == 0) {
 		BCM4313_UNLOCK(sc);
 		return;
@@ -1594,9 +1614,10 @@ bcm4313_intrtask(void *arg, int pending)
  * has an intstatus register in the core's shared intctrlregs block (d11.h:
  * intctrlregs[8] at 0x20, indexed by FIFO number); the error bits latch
  * whether or not they are enabled in the MAC interrupt path, so polling is
- * sufficient.  Returns nonzero (fatal) when a controller has faulted -- the
- * engine is in an undefined state and only the ring/core reset below
- * clears it.
+ * sufficient.  Returns -1 when the core stopped answering reads (all-ones
+ * register; the MAC has been halted and no register but MACCONTROL is
+ * touched), >0 when a controller has faulted (latched bits cleared and
+ * counted; recovery is a full stop/disarm + re-init), 0 when healthy.
  */
 static int
 bcm4313_fifo_errors_locked(struct bcm4313_softc *sc)
@@ -1613,8 +1634,24 @@ bcm4313_fifo_errors_locked(struct bcm4313_softc *sc)
 	fatal = 0;
 	for (i = 0; i < nitems(fifos); i++) {
 		intstatus = bcm4313_read_4(sc,
-		    BCM4313_D11_DMA_INTSTATUS(fifos[i])) &
-		    BCM4313_DMA_I_ERRORS;
+		    BCM4313_D11_DMA_INTSTATUS(fifos[i]));
+		/*
+		 * All-ones means the core is not answering reads anymore
+		 * (wedged past the bus / clock-gated / dead); per-controller
+		 * "fifo %d" diagnostics would be fiction at this point, and
+		 * the reset ordered on their behalf can never handshake.
+		 */
+		if (!bcm4313_intstatus_valid(intstatus)) {
+			device_printf(sc->sc_dev, "DMA core not responding "
+			    "(intstatus %#x); MAC stopped, re-up to recover\n",
+			    intstatus);
+			sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
+			bcm4313_write_4(sc, BCM4313_D11_MACCONTROL,
+			    bcm4313_read_4(sc, BCM4313_D11_MACCONTROL) &
+			    ~(BCM4313_MCTL_EN_MAC | BCM4313_MCTL_PSM_RUN));
+			return (-1);
+		}
+		intstatus &= BCM4313_DMA_I_ERRORS;
 		if (intstatus == 0)
 			continue;
 		if (intstatus & BCM4313_DMA_I_RO)
@@ -1628,16 +1665,20 @@ bcm4313_fifo_errors_locked(struct bcm4313_softc *sc)
 			    "DMA fifo %d: data error\n", fifos[i]);
 		if (intstatus & BCM4313_DMA_I_DE)
 			device_printf(sc->sc_dev,
-			    "DMA fifo %d: descriptor protocol error\n", fifos[i]);
+			    "DMA fifo %d: descriptor protocol error\n",
+			    fifos[i]);
 		if (intstatus & BCM4313_DMA_I_XU)
 			device_printf(sc->sc_dev,
 			    "DMA fifo %d: transmit fifo underflow\n", fifos[i]);
 		/*
-		 * Clear the latched bits so a fault that survives the reset below
-		 * cannot re-trigger it on every tick.
+		 * Clear the latched bits so a fault that survives the recovery
+		 * below cannot re-trigger it on every tick.
 		 */
 		bcm4313_write_4(sc, BCM4313_D11_DMA_INTSTATUS(fifos[i]),
 		    intstatus);
+		sc->sc_dmaerr[fifos[i]]++;
+		sc->sc_dmaerr_fifo = fifos[i];
+		sc->sc_dmaerr_bits = intstatus;
 		fatal = 1;
 	}
 	return (fatal);
@@ -1657,36 +1698,63 @@ bcm4313_watchdog(void *arg)
 		 * (brcmsmac: brcms_b_watchdog() -> brcms_b_fifoerrors()).
 		 */
 		reset = bcm4313_fifo_errors_locked(sc);
-		if (reset)
-			device_printf(sc->sc_dev,
-			    "DMA engine error; resetting MAC\n");
-		else if (--sc->sc_watchdog_timer <= 0) {
-			device_printf(sc->sc_dev,
-			    "watchdog timeout: resetting MAC\n");
-			reset = 1;
-		}
-		if (reset) {
+		if (reset < 0) {
+			/*
+			 * Core stopped answering reads: fifo_errors_locked()
+			 * has already stopped the MAC.  Do NOT touch any other
+			 * register and do not reset here -- a reset ordered
+			 * while the core is in this state can never handshake
+			 * ("BCMA_DMP_RESETSTATUS timeout", "core reset failed:
+			 * 60").  The interface re-up performs the clean
+			 * stop -> reset -> init dance.
+			 */
 			sc->sc_wdog_fires++;
 			counter_u64_add(sc->sc_ic.ic_oerrors, 1);
+		} else if (reset > 0) {
 			/*
-			 * Halt the D11 PSM before the core reset.  A wedged ucode can
-			 * hold a backplane transaction, so the DMP reset handshake never
-			 * completes (bcma_dmp_wait_reset -> ETIMEDOUT, "BCMA_DMP_RESETSTATUS
-			 * timeout").  Force the ucode to jump to 0 and drop MAC+PSM run,
-			 * like brcmsmac's "just stop the psm" path, before the reset.
+			 * A DMA engine faulted.  brcmsmac answers this with a
+			 * full stop/start (brcms_fatal_error).  Here the core is
+			 * still alive (per-controller status reads sanity-checked
+			 * above), but a MAC-forced bus transaction in flight
+			 * during the core reset is what historically turned
+			 * recovery into "BCMA_DMP_RESETSTATUS timeout" + "core
+			 * reset failed: 60" and killed the card.  Halt the PSM,
+			 * drop RUNNING so transmit() rejects frames, and let the
+			 * user re-up: stop_locked() then disarms every DMA engine
+			 * (dma_txreset/dma_rxreset sequence) before the core
+			 * reset -- the same ordering brcms_b_corereset() enforces.
 			 */
+			sc->sc_wdog_fires++;
+			counter_u64_add(sc->sc_ic.ic_oerrors, 1);
+			device_printf(sc->sc_dev,
+			    "DMA engine error; MAC stopped, re-up to recover\n");
 			mc = bcm4313_read_4(sc, BCM4313_D11_MACCONTROL);
 			mc &= ~(BCM4313_MCTL_EN_MAC | BCM4313_MCTL_PSM_RUN);
 			mc |= BCM4313_MCTL_PSM_JMP_0;
 			bcm4313_write_4(sc, BCM4313_D11_MACCONTROL, mc);
-			DELAY(1000);
-			bcm4313_init_locked(sc);
+			sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
+		} else if (--sc->sc_watchdog_timer <= 0) {
+			/*
+			 * No frame and no TX completion for 5s while the
+			 * interface is up.  Recovery faces the same constraint
+			 * as the DMA-fault case above: disarm the engines via a
+			 * full stop (next up) instead of resetting the core
+			 * under a possibly-live MAC.
+			 */
+			sc->sc_wdog_fires++;
+			counter_u64_add(sc->sc_ic.ic_oerrors, 1);
+			device_printf(sc->sc_dev,
+			    "watchdog timeout: MAC stopped, re-up to recover\n");
+			mc = bcm4313_read_4(sc, BCM4313_D11_MACCONTROL);
+			mc &= ~(BCM4313_MCTL_EN_MAC | BCM4313_MCTL_PSM_RUN);
+			mc |= BCM4313_MCTL_PSM_JMP_0;
+			bcm4313_write_4(sc, BCM4313_D11_MACCONTROL, mc);
+			sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
 		} else {
 			/*
 			 * Periodic LCN temperature-based TX-power recalibration
 			 * (brcmsmac brcms_b_watchdog() -> wlc_phy_watchdog());
-			 * a reset tick above already re-ran the full
-			 * calibration in init_locked() and re-armed the timer.
+			 * runs only on healthy ticks.
 			 */
 			bcm4313_lcnphy_watchdog(sc);
 		}
@@ -1707,8 +1775,17 @@ bcm4313_stop_locked(struct bcm4313_softc *sc)
 	struct mbuf *m;
 
 	BCM4313_ASSERT_LOCKED(sc);
-	if ((sc->sc_flags & BCM4313_FLAG_RUNNING) == 0)
-		return;
+	/*
+	 * Always run the teardown below, even when !RUNNING: the watchdog
+	 * drops RUNNING *before* the user re-ups, and the up path that
+	 * follows must still disarm the DMA engines (suspend -> disable ->
+	 * DISABLED, then the 300us drain) before it resets the core.
+	 * Skipping the teardown in that state would leave engines live
+	 * across bhnd_reset_hw() -- masters stuck on the backplane,
+	 * "BCMA_DMP_RESETSTATUS timeout", "core reset failed: 60".
+	 * brcmsmac does the same: brcms_b_corereset() runs dma_txreset/
+	 * dma_rxreset whenever the core is enabled, RUNNING or not.
+	 */
 	sc->sc_flags &= ~(BCM4313_FLAG_RUNNING | BCM4313_FLAG_SCAN);
 	callout_stop(&sc->sc_watchdog_ch);
 
@@ -1740,6 +1817,18 @@ bcm4313_init_locked(struct bcm4313_softc *sc)
 	int error;
 
 	BCM4313_ASSERT_LOCKED(sc);
+	if (sc->sc_flags & BCM4313_FLAG_DEAD) {
+		/*
+		 * Latched dead-core state: the core stopped answering reads
+		 * and nothing short of a driver re-load (new probe, fresh
+		 * core state) will revive it.  Refuse here so the recovery
+		 * reset -- which can never handshake in this state -- is not
+		 * re-ordered on every re-up.
+		 */
+		device_printf(sc->sc_dev, "core is dead; reload the driver "
+		    "(or power-cycle) to recover\n");
+		return;
+	}
 	if (sc->sc_flags & BCM4313_FLAG_RUNNING)
 		bcm4313_stop_locked(sc);
 
@@ -1748,8 +1837,19 @@ bcm4313_init_locked(struct bcm4313_softc *sc)
 	    BCM4313_IOCTL_SUPPORT_G;
 	if ((error = bhnd_reset_hw(sc->sc_dev, ioctl, ioctl)) != 0) {
 		device_printf(sc->sc_dev, "core reset failed: %d\n", error);
+		/*
+		 * A failed handshake means masters are still holding the
+		 * backplane; every further attempt would only repeat the
+		 * timeout.  Latch the dead state and refuse future attempts.
+		 */
+		sc->sc_flags |= BCM4313_FLAG_DEAD;
 		return;
 	}
+	/*
+	 * The core came out of reset cleanly -- a previously wedged
+	 * state is gone, so recovery attempts are allowed again.
+	 */
+	sc->sc_flags &= ~BCM4313_FLAG_DEAD;
 	DELAY(2000);
 	ioctl = BHND_IOCTL_CLK_FORCE;
 	ioctl_mask = BHND_IOCTL_CLK_FORCE | BCM4313_IOCTL_PHYRESET |
@@ -1895,6 +1995,24 @@ bcm4313_sysctl_calsample(SYSCTL_HANDLER_ARGS)
 	return (sysctl_handle_int(oidp, &sample, 0, req));
 }
 
+/* Per-FIFO DMA fault tally, plus fifo/bits of the most recent fault. */
+static int
+bcm4313_sysctl_dmaerr(SYSCTL_HANDLER_ARGS)
+{
+	struct bcm4313_softc *sc = arg1;
+	char buf[128];
+	int i, len;
+
+	len = snprintf(buf, sizeof(buf), "fifo");
+	for (i = 0; i < 8; i++)
+		len += snprintf(buf + len, sizeof(buf) - len,
+		    " %u", sc->sc_dmaerr[i]);
+	snprintf(buf + len, sizeof(buf) - len,
+	    " last=%u bits=%#x", sc->sc_dmaerr_fifo,
+	    sc->sc_dmaerr_bits);
+	return (sysctl_handle_string(oidp, buf, sizeof(buf), req));
+}
+
 static void
 bcm4313_sysctl_setup(struct bcm4313_softc *sc)
 {
@@ -1949,6 +2067,10 @@ bcm4313_sysctl_setup(struct bcm4313_softc *sc)
 	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
 	    "rxgiants", CTLFLAG_RD, &sc->sc_rxgiants, 0,
 	    "Oversized RX frames dropped");
+	SYSCTL_ADD_PROC(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "dmaerr", CTLTYPE_STRING | CTLFLAG_RD, sc, 0,
+	    bcm4313_sysctl_dmaerr, "A",
+	    "Per-FIFO DMA error counts + last error (fifo/bits)");
 
 	/*
 	 * Periodic temperature-based TX-power recalibration loop
