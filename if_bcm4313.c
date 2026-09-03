@@ -1298,6 +1298,8 @@ bcm4313_scan_start(struct ieee80211com *ic)
 	struct bcm4313_softc *sc = ic->ic_softc;
 
 	BCM4313_LOCK(sc);
+	/* Defer periodic PHY recalibration while net80211 scans. */
+	sc->sc_flags |= BCM4313_FLAG_SCAN;
 	if ((sc->sc_flags & BCM4313_FLAG_RUNNING) != 0) {
 		/*
 		 * During a scan the MAC must pass beacons from any BSSID
@@ -1320,6 +1322,7 @@ bcm4313_scan_end(struct ieee80211com *ic)
 	struct bcm4313_softc *sc = ic->ic_softc;
 
 	BCM4313_LOCK(sc);
+	sc->sc_flags &= ~BCM4313_FLAG_SCAN;
 	if ((sc->sc_flags & BCM4313_FLAG_RUNNING) != 0) {
 		bcm4313_maskset_4(sc, BCM4313_D11_MACCONTROL,
 		    ~BCM4313_MCTL_BCNS_PROMISC, 0);
@@ -1547,22 +1550,123 @@ bcm4313_intrtask(void *arg, int pending)
 		sc->sc_intr_mask &= ~BCM4313_MI_GP0;
 		bcm4313_write_4(sc, BCM4313_D11_MACINTMASK, sc->sc_intr_mask);
 	}
+	if (reason & BCM4313_MI_RFDISABLE) {
+		bool blocked;
+
+		/*
+		 * Hardware RF kill switch changed state (edge interrupt,
+		 * debounced by the rfdisable-delay timer).  net80211 has no
+		 * rfkill(4) equivalent, so mirror brcmsmac's reaction as far as
+		 * the model allows: remember the state for dev.bcm4313.0.rfkill,
+		 * and while blocked stop the MAC and drop FLAG_RUNNING so
+		 * transmit() rejects frames -- an empty scan on a 4313 laptop is
+		 * usually this switch, not a dead RX path.  Keep MI_RFDISABLE
+		 * unmasked so the re-enable edge is caught too.
+		 * (brcmsmac: MI_RFDISABLE -> brcms_rfkill_set_hw_state() ->
+		 * phydebug & PDBG_RFD.)
+		 */
+		blocked = (bcm4313_read_4(sc, BCM4313_D11_PHYDEBUG) &
+		    BCM4313_PDBG_RFD) != 0;
+		if (blocked && !sc->sc_radio_off) {
+			device_printf(sc->sc_dev,
+			    "hardware radio disabled (RF kill switch); MAC "
+			    "stopped -- flip the switch, then re-up the "
+			    "interface (ifconfig wlan down/up)\n");
+			if (sc->sc_flags & BCM4313_FLAG_RUNNING) {
+				bcm4313_write_4(sc, BCM4313_D11_MACCONTROL,
+				    bcm4313_read_4(sc, BCM4313_D11_MACCONTROL) &
+				    ~(BCM4313_MCTL_EN_MAC | BCM4313_MCTL_PSM_RUN));
+				sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
+			}
+		} else if (!blocked && sc->sc_radio_off) {
+			device_printf(sc->sc_dev,
+			    "hardware radio enabled; re-up the interface to "
+			    "reconnect\n");
+		}
+		sc->sc_radio_off = blocked ? 1 : 0;
+	}
 	BCM4313_UNLOCK(sc);
+}
+
+/*
+ * Poll the per-DMA-controller error bits once per second, like brcmsmac's
+ * brcms_b_fifoerrors() (called from its watchdog).  Every D11 DMA engine
+ * has an intstatus register in the core's shared intctrlregs block (d11.h:
+ * intctrlregs[8] at 0x20, indexed by FIFO number); the error bits latch
+ * whether or not they are enabled in the MAC interrupt path, so polling is
+ * sufficient.  Returns nonzero (fatal) when a controller has faulted -- the
+ * engine is in an undefined state and only the ring/core reset below
+ * clears it.
+ */
+static int
+bcm4313_fifo_errors_locked(struct bcm4313_softc *sc)
+{
+	static const uint8_t fifos[] = {
+	    BCM4313_RX_FIFO,		/* 0: RX data */
+	    BCM4313_TX_BE_FIFO,		/* 1: TX data */
+	    BCM4313_RX_TXSTATUS_FIFO	/* 3: TX status */
+	};
+	uint32_t intstatus;
+	int fatal, i;
+
+	BCM4313_ASSERT_LOCKED(sc);
+	fatal = 0;
+	for (i = 0; i < nitems(fifos); i++) {
+		intstatus = bcm4313_read_4(sc,
+		    BCM4313_D11_DMA_INTSTATUS(fifos[i])) &
+		    BCM4313_DMA_I_ERRORS;
+		if (intstatus == 0)
+			continue;
+		if (intstatus & BCM4313_DMA_I_RO)
+			device_printf(sc->sc_dev,
+			    "DMA fifo %d: receive fifo overflow\n", fifos[i]);
+		if (intstatus & BCM4313_DMA_I_PC)
+			device_printf(sc->sc_dev,
+			    "DMA fifo %d: descriptor error\n", fifos[i]);
+		if (intstatus & BCM4313_DMA_I_PD)
+			device_printf(sc->sc_dev,
+			    "DMA fifo %d: data error\n", fifos[i]);
+		if (intstatus & BCM4313_DMA_I_DE)
+			device_printf(sc->sc_dev,
+			    "DMA fifo %d: descriptor protocol error\n", fifos[i]);
+		if (intstatus & BCM4313_DMA_I_XU)
+			device_printf(sc->sc_dev,
+			    "DMA fifo %d: transmit fifo underflow\n", fifos[i]);
+		/*
+		 * Clear the latched bits so a fault that survives the reset below
+		 * cannot re-trigger it on every tick.
+		 */
+		bcm4313_write_4(sc, BCM4313_D11_DMA_INTSTATUS(fifos[i]),
+		    intstatus);
+		fatal = 1;
+	}
+	return (fatal);
 }
 
 static void
 bcm4313_watchdog(void *arg)
 {
 	struct bcm4313_softc *sc = arg;
+	uint32_t mc;
+	int reset;
 
 	BCM4313_LOCK(sc);
 	if (sc->sc_flags & BCM4313_FLAG_RUNNING) {
-		if (--sc->sc_watchdog_timer <= 0) {
-			sc->sc_wdog_fires++;
-			uint32_t mc;
-
+		/*
+		 * Check the DMA engines first, before the TX watchdog timer
+		 * (brcmsmac: brcms_b_watchdog() -> brcms_b_fifoerrors()).
+		 */
+		reset = bcm4313_fifo_errors_locked(sc);
+		if (reset)
+			device_printf(sc->sc_dev,
+			    "DMA engine error; resetting MAC\n");
+		else if (--sc->sc_watchdog_timer <= 0) {
 			device_printf(sc->sc_dev,
 			    "watchdog timeout: resetting MAC\n");
+			reset = 1;
+		}
+		if (reset) {
+			sc->sc_wdog_fires++;
 			counter_u64_add(sc->sc_ic.ic_oerrors, 1);
 			/*
 			 * Halt the D11 PSM before the core reset.  A wedged ucode can
@@ -1577,6 +1681,14 @@ bcm4313_watchdog(void *arg)
 			bcm4313_write_4(sc, BCM4313_D11_MACCONTROL, mc);
 			DELAY(1000);
 			bcm4313_init_locked(sc);
+		} else {
+			/*
+			 * Periodic LCN temperature-based TX-power recalibration
+			 * (brcmsmac brcms_b_watchdog() -> wlc_phy_watchdog());
+			 * a reset tick above already re-ran the full
+			 * calibration in init_locked() and re-armed the timer.
+			 */
+			bcm4313_lcnphy_watchdog(sc);
 		}
 	}
 	callout_schedule(&sc->sc_watchdog_ch, hz);
@@ -1597,7 +1709,7 @@ bcm4313_stop_locked(struct bcm4313_softc *sc)
 	BCM4313_ASSERT_LOCKED(sc);
 	if ((sc->sc_flags & BCM4313_FLAG_RUNNING) == 0)
 		return;
-	sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
+	sc->sc_flags &= ~(BCM4313_FLAG_RUNNING | BCM4313_FLAG_SCAN);
 	callout_stop(&sc->sc_watchdog_ch);
 
 	/* Mask and clear interrupts; disable the MAC. */
@@ -1661,6 +1773,25 @@ bcm4313_init_locked(struct bcm4313_softc *sc)
 		return;
 	}
 
+	/*
+	 * Refuse to start while the hardware RF kill switch is engaged
+	 * (brcmsmac refuses the same way: brcms_b_up_prep() reports
+	 * -ENOMEDIUM and brcms_c_up() leaves the radio down).  The core is
+	 * enabled and clocked here, so phydebug is valid; reading it at probe
+	 * time (before PHYCLOCK_ENABLE) is what the old "unsupported PHY
+	 * type 15" bug did wrong.  MI_RFDISABLE keeps the state fresh while
+	 * running and logs the re-enable edge.
+	 */
+	if (bcm4313_read_4(sc, BCM4313_D11_PHYDEBUG) & BCM4313_PDBG_RFD) {
+		if (sc->sc_radio_off == 0)
+			device_printf(sc->sc_dev,
+			    "hardware radio disabled (RF kill switch); "
+			    "flip the switch and re-up the interface\n");
+		sc->sc_radio_off = 1;
+		return;
+	}
+	sc->sc_radio_off = 0;
+
 	/* Basic MAC control: 2.4GHz (GMODE), MAC disabled. */
 	ctl = bcm4313_read_4(sc, BCM4313_D11_MACCONTROL);
 	ctl &= ~BCM4313_MCTL_EN_MAC;
@@ -1688,11 +1819,18 @@ bcm4313_init_locked(struct bcm4313_softc *sc)
 
 	/* Interrupts. */
 	sc->sc_intr_mask = BCM4313_MI_DMAINT | BCM4313_MI_TFS |
-	    BCM4313_MI_GP0 | BCM4313_MI_MACTXERR | BCM4313_MI_PHYTXERR;
+	    BCM4313_MI_GP0 | BCM4313_MI_MACTXERR | BCM4313_MI_PHYTXERR |
+	    BCM4313_MI_RFDISABLE;
 	bcm4313_write_4(sc, BCM4313_D11_MACINTMASK, sc->sc_intr_mask);
 
 	/* Start the MAC. */
 	bcm4313_mac_enable(sc);
+	/*
+	 * Enable the ucode's RF-disable debounce timer so MI_RFDISABLE fires
+	 * on a settled switch change.  (brcmsmac brcms_c_init: "enable the RF
+	 * Disable Delay timer", RFDISABLE_DEFAULT.)
+	 */
+	bcm4313_write_4(sc, BCM4313_D11_RFDISABLEDLY, BCM4313_RFDISABLE_DEFAULT);
 	DELAY(100);
 
 	sc->sc_flags |= BCM4313_FLAG_RUNNING;
@@ -1743,7 +1881,20 @@ bcm4313_probe(device_t dev)
  *   txdone   - tx statuses drained from the status ring
  *   wdogfires- watchdog resets + PSM watchdog events
  *   dma{tx,rx,txstatus} - live ring producer/consumer positions
+ *   cal*     - periodic temperature-based recalibration loop
+ *              (calticks rises 1/s; calfires counts glacial recals)
  */
+/* calsample is a uint8_t in the softc; hand it back as an int. */
+static int
+bcm4313_sysctl_calsample(SYSCTL_HANDLER_ARGS)
+{
+	struct bcm4313_softc *sc = arg1;
+	int sample;
+
+	sample = sc->sc_lcn.lcnphy_cal_counter;
+	return (sysctl_handle_int(oidp, &sample, 0, req));
+}
+
 static void
 bcm4313_sysctl_setup(struct bcm4313_softc *sc)
 {
@@ -1762,6 +1913,9 @@ bcm4313_sysctl_setup(struct bcm4313_softc *sc)
 	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
 	    "intrmask", CTLFLAG_RD, &sc->sc_intr_mask, 0,
 	    "Current MAC interrupt mask");
+	SYSCTL_ADD_INT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "rfkill", CTLFLAG_RD, &sc->sc_radio_off, 0,
+	    "Hardware RF kill state: 0 radio on, 1 hard-blocked");
 	SYSCTL_ADD_INT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
 	    "dmatx", CTLFLAG_RD, &sc->sc_tx.r_out, 0,
 	    "TX ring producer position");
@@ -1795,6 +1949,30 @@ bcm4313_sysctl_setup(struct bcm4313_softc *sc)
 	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
 	    "rxgiants", CTLFLAG_RD, &sc->sc_rxgiants, 0,
 	    "Oversized RX frames dropped");
+
+	/*
+	 * Periodic temperature-based TX-power recalibration loop
+	 * (bcm4313_lcnphy_watchdog, ~every 3.5 min on tempsense boards):
+	 * calticks counts per-second ticks while the MAC is up, callastfull
+	 * is the tick of the last full calibration, calsample counts the
+	 * temperature samples taken since (0..90 before a recalibration)
+	 * and calfires counts the glacial IQLO+VCO recalibrations run.
+	 * Soak test: calticks must climb 1/s and calfires must increment
+	 * roughly every 3-4 minutes while associated.
+	 */
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "calticks", CTLFLAG_RD, &sc->sc_lcn.lcnphy_now, 0,
+	    "Per-second recalibration ticks while the MAC is up");
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "callastfull", CTLFLAG_RD, &sc->sc_lcn.lcnphy_lastcal, 0,
+	    "calticks value at the last full calibration");
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "calfires", CTLFLAG_RD, &sc->sc_lcn.lcnphy_glacial_fires, 0,
+	    "Glacial IQLO+VCO recalibrations run (~1 per 3.5 min)");
+	SYSCTL_ADD_PROC(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "calsample", CTLTYPE_INT | CTLFLAG_RD, sc, 0,
+	    bcm4313_sysctl_calsample, "I",
+	    "Temp samples since the last glacial recalibration (0..90)");
 }
 
 static int

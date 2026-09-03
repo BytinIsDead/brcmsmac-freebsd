@@ -76,6 +76,7 @@ MALLOC_DECLARE(M_BCM4313);
 #define	BCM4313_D11_MACCOMMAND		0x124	/* maccommand */
 #define	BCM4313_D11_MACINTSTATUS	0x128	/* macintstatus */
 #define	BCM4313_D11_MACINTMASK		0x12C	/* macintmask */
+#define	BCM4313_D11_PHYDEBUG		0x158	/* phydebug: PHY status bits */
 #define	BCM4313_D11_OBJADDR		0x160	/* objaddr: ucode/shm window */
 #define	BCM4313_D11_OBJDATA		0x164	/* objdata */
 #define	BCM4313_D11_FRMTXSTATUS		0x170	/* frmtxstatus */
@@ -87,6 +88,7 @@ MALLOC_DECLARE(M_BCM4313);
 #define	BCM4313_D11_CLK_CTL_ST		0x1E0	/* clk_ctl_st (HT clock) */
 #define	BCM4313_D11_RADIOADDR		0x3D8	/* radioregaddr (16-bit) */
 #define	BCM4313_D11_RADIODATA		0x3DA	/* radioregdata (16-bit) */
+#define	BCM4313_D11_RFDISABLEDLY	0x3DC	/* rfdisabledly: ucode debounce timer */
 #define	BCM4313_D11_PHYVER		0x3E0	/* phyversion (16-bit) */
 #define	BCM4313_D11_PHY4WADDR		0x3F6	/* phy4waddr (32-bit PHYs) */
 #define	BCM4313_D11_PHY4WDATAHI		0x3F8
@@ -109,9 +111,20 @@ MALLOC_DECLARE(M_BCM4313);
 #define	BCM4313_MI_DMAINT		(1 << 15)
 #define	BCM4313_MI_TXSTOP		(1 << 16)
 #define	BCM4313_MI_PWRUP		(1 << 21)
+#define	BCM4313_MI_RFDISABLE		(1 << 28)	/* RF disable input changed */
 #define	BCM4313_MI_TFS			(1 << 29)
 #define	BCM4313_MI_PHYCHANGED		(1 << 30)
 #define	BCM4313_MI_TO			(1U << 31)
+
+/* phydebug bits (brcmsmac d11.h, "== phydebug =="). */
+#define	BCM4313_PDBG_RFD		(1 << 16)	/* RF portion of the radio is disabled */
+
+/*
+ * rfdisabledly value (brcmsmac RFDISABLE_DEFAULT): ~500 ms measured on the
+ * ALP clock.  It debounces the hardware RF kill switch so the ucode raises
+ * MI_RFDISABLE on a real change instead of on contact bounce.
+ */
+#define	BCM4313_RFDISABLE_DEFAULT	10000000
 
 /* maccontrol bits (MCTL_*). */
 #define	BCM4313_MCTL_GMODE		(1U << 31)
@@ -232,6 +245,23 @@ MALLOC_DECLARE(M_BCM4313);
 #define	BCM4313_RX_FIFO			0	/* data + ctl frames */
 #define	BCM4313_TX_BE_FIFO		1	/* best-effort data */
 #define	BCM4313_RX_TXSTATUS_FIFO	3	/* tx status packets */
+
+/* DMA controller interrupt control (d11.h: intctrlregs[8] at 0x20; one
+ * intstatus/intmask pair per DMA engine, indexed by FIFO number). */
+#define	BCM4313_D11_DMA_INTSTATUS(fifo)	(0x20 + (fifo) * 8)
+
+/* intctrlregs intstatus error bits (d11.h "intstatus and intmask"). */
+#define	BCM4313_DMA_I_PC		(1 << 10)	/* descriptor error */
+#define	BCM4313_DMA_I_PD		(1 << 11)	/* data error */
+#define	BCM4313_DMA_I_DE		(1 << 12)	/* descriptor protocol error */
+#define	BCM4313_DMA_I_RU		(1 << 13)	/* rx descriptor underflow */
+#define	BCM4313_DMA_I_RO		(1 << 14)	/* rx fifo overflow */
+#define	BCM4313_DMA_I_XU		(1 << 15)	/* tx fifo underflow */
+/* Fatal set the watchdog polls (brcmsmac main.h I_ERRORS).  I_RU is left
+ * out on purpose: underflow is refilled elsewhere, and a constant
+ * underflow would make every watchdog tick fatal. */
+#define	BCM4313_DMA_I_ERRORS		(BCM4313_DMA_I_PC | BCM4313_DMA_I_PD | \
+    BCM4313_DMA_I_DE | BCM4313_DMA_I_RO | BCM4313_DMA_I_XU)
 
 /* dma64 per-channel registers (struct dma64regs). */
 #define	BCM4313_DMA64_CTL		0x00	/* control */
@@ -566,6 +596,15 @@ struct bcm4313_lcnphy {
 	uint8_t		lcnphy_full_cal_channel;
 	uint8_t		lcnphy_cal_counter;
 	uint16_t	lcnphy_cal_temper;
+	/*
+	 * Periodic recalibration loop (wlc_phy_watchdog): lcnphy_now counts
+	 * per-second ticks while the MAC is up (upstream sh->now);
+	 * lcnphy_lastcal is its value at the last full calibration
+	 * (upstream pi->phy_lastcal).
+	 */
+	uint32_t	lcnphy_now;
+	uint32_t	lcnphy_lastcal;
+	uint32_t	lcnphy_glacial_fires;	/* glacial IQLO+VCO recalibrations */
 	bool		lcnphy_recal;
 
 	uint32_t	lcnphy_mcs20_po;
@@ -646,6 +685,7 @@ void bcm4313_mac_disable(struct bcm4313_softc *);
 void bcm4313_lcnphy_init(struct bcm4313_softc *);
 void bcm4313_lcnphy_set_chanspec(struct bcm4313_softc *, uint8_t);
 void bcm4313_lcnphy_calib_modes(struct bcm4313_softc *, uint32_t);
+void bcm4313_lcnphy_watchdog(struct bcm4313_softc *);
 void bcm4313_lcnphy_cal_init(struct bcm4313_softc *);
 void bcm4313_lcnphy_txpower_recalc_target(struct bcm4313_softc *);
 void bcm4313_lcnphy_txpwr_srom_read(struct bcm4313_softc *);
@@ -655,6 +695,11 @@ void bcm4313_lcnphy_txpwr_srom_read(struct bcm4313_softc *);
 #define	BCM4313_LCNPHY_PERICAL_CHAN	7	/* PHY_PERICAL_CHAN */
 #define	BCM4313_LCN_FULLCAL		8	/* PHY_FULLCAL */
 #define	BCM4313_LCNPHY_PERICAL_TEMPBASED_TXPWRCTRL	9
+
+/* Quiet seconds after a full calibration before the per-second
+ * temperature-based recalibration re-arms (brcmsmac
+ * PHY_SW_TIMER_GLACIAL, phy_int.h: 120). */
+#define	BCM4313_LCNPHY_CAL_INTERVAL	120
 
 /*
  * ---------------------------------------------------------------------------
@@ -786,6 +831,7 @@ struct bcm4313_softc {
 	unsigned		sc_flags;
 #define	BCM4313_FLAG_ATTACHED	(1 << 0)
 #define	BCM4313_FLAG_RUNNING	(1 << 1)
+#define	BCM4313_FLAG_SCAN	(1 << 2)	/* net80211 scan in progress */
 
 	/* radiotap capture (monitor mode) */
 	struct bcm4313_rx_radiotap_header sc_rx_th;
@@ -829,6 +875,7 @@ struct bcm4313_softc {
 
 	/* MAC state */
 	uint32_t		sc_intr_mask;
+	int			sc_radio_off;	/* hw RF kill engaged (PDBG_RFD), sysctl */
 	int			sc_ucode_loaded;	/* D11 LCN ucode uploaded */
 	char			sc_fw_path[128];	/* (reserved) firmware search dir */
 	uint8_t			sc_bssid[IEEE80211_ADDR_LEN];

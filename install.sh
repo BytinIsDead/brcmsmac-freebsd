@@ -5,6 +5,12 @@
 #   sh install.sh          # build, install, (re)load, create wlan0, up, scan
 #   sh install.sh boot     # same, plus load at boot (loader.conf + rc.conf)
 #   sh install.sh --skip-build   # install the existing if_bcm4313.ko only
+#   sh install.sh --help   # this text
+#
+# Run interactively, it finishes by asking whether you want to connect to a
+# network now -- if you say yes it hands off to config.sh, which scans for
+# networks, asks for the password, runs DHCP and (with `boot`) persists the
+# connection across reboots.  Set NO_TUI=1 to skip that question.
 #
 # Environment overrides (passed through to build.sh):
 #   SYSDIR=/path/to/sys        kernel source tree (default: /usr/src/sys)
@@ -13,6 +19,7 @@
 #   WLDEV=bcm43130             net80211 device name (default: from
 #                              `sysctl net.wlan.devices`)
 #   WLANIF=wlan0               interface to create over WLDEV
+#   NO_TUI=1                   never ask interactive questions
 #
 # The driver trades itself in safely: any already-loaded if_bcm4313 is
 # unloaded first (stale wlan interfaces over it are destroyed first, because
@@ -31,11 +38,13 @@ SKIP_BUILD=0
 MODE="install"
 for a in "$@"; do
     case "$a" in
+    -h|--help)      fb_usage; exit 0 ;;
     boot)           MODE="boot" ;;
     --skip-build)   SKIP_BUILD=1 ;;
     *)
         echo "ERROR: unknown argument '$a'" >&2
         echo "       usage: sh install.sh [boot] [--skip-build]" >&2
+        echo "       full usage: sh install.sh --help" >&2
         exit 1
         ;;
     esac
@@ -191,6 +200,10 @@ if fb_if_is_up "$WLANIF"; then
 else
     fb_fail "$WLANIF not UP"
 fi
+if [ "$(sysctl -n dev.bcm4313.0.rfkill 2>/dev/null)" = "1" ]; then
+    fb_warn "hardware RF kill switch is ON (dev.bcm4313.0.rfkill=1) -- the radio is blocked;"
+    echo "         flip the switch / Fn key, then re-run (or: ifconfig $WLANIF down && up)"
+fi
 if pciconf -ll 2>/dev/null | grep -q 'bcm4313'; then
     fb_ok "PCI front-end bound: $(pciconf -ll 2>/dev/null | grep 'bcm4313' | head -1 | tr -s ' ')"
 else
@@ -206,12 +219,25 @@ else
     fb_warn "no dev.bcm4313 sysctls (module predates this build? re-run without --skip-build)"
 fi
 echo
-echo "Driver is live. To join a network now:"
-echo "    ifconfig $WLANIF ssid YOUR_SSID wpakey YOUR_PASSWORD"
-echo "    dhclient $WLANIF          # or: dhcpcd $WLANIF"
-echo "Or with wpa_supplicant instead of an inline key:"
-echo "    wpa_supplicant -B -i $WLANIF -c /etc/wpa_supplicant.conf"
-echo "    dhclient $WLANIF"
+echo "Driver is live. To connect to a Wi-Fi network, run:"
+echo "    sh config.sh                          # menu: scan & pick a network"
+echo "    sh config.sh MySSID MyPassword        # one-shot: connect + DHCP"
+echo "    sh config.sh --boot MySSID MyPassword # same, plus reconnect at boot"
+echo "    sh config.sh --help                   # every option, explained"
+echo
+echo "Each tool also prints its own manual with --help:"
+echo "    sh install.sh --help, sh build.sh --help, sh diag.sh --help"
+if [ "$MODE" = "boot" ]; then
+    if fb_ask "Set up Wi-Fi for this session AND future boots (launches config.sh --boot)?"; then
+        echo "==> launching config.sh --boot"
+        sh "$HERE/config.sh" --boot || fb_die "config.sh did not finish cleanly (see its messages above)."
+    fi
+else
+    if fb_ask "Connect to a network now (launches config.sh)?"; then
+        echo "==> launching config.sh"
+        sh "$HERE/config.sh" || fb_die "config.sh did not finish cleanly (see its messages above)."
+    fi
+fi
 
 # --- optional boot persistence ------------------------------------------------
 if [ "$MODE" = "boot" ]; then
@@ -221,6 +247,7 @@ if [ "$MODE" = "boot" ]; then
     else
         echo "==> appending 'if_bcm4313_load=\"YES\"' to $conf"
         echo 'if_bcm4313_load="YES"' >> "$conf"
+        echo "    (alternative, rc.conf-only:  sysrc kld_list+=if_bcm4313)"
     fi
 
     rcconf="/etc/rc.conf"
@@ -231,8 +258,14 @@ if [ "$MODE" = "boot" ]; then
         echo "wlans_if_${WLDEV}=\"$WLANIF\"" >> "$rcconf"
     fi
     echo
-    echo "To also connect + get an address at boot, add to $rcconf:"
-    echo "    ifconfig_${WLANIF}=\"WPA DHCP\""
-    echo "    wpa_supplicant_enable=\"YES\""
-    echo "and put your network in /etc/wpa_supplicant.conf (see INSTALL.md)."
+    if grep -q '^wpa_supplicant_enable=' "$rcconf" 2>/dev/null; then
+        echo "==> boot-time Wi-Fi is fully configured (config.sh --boot added the rc.conf entries)"
+        echo "    network(s) live in /etc/wpa_supplicant.conf; add more there if needed."
+    else
+        echo "To also connect + get an address at boot, add to $rcconf:"
+        echo "    ifconfig_${WLANIF}=\"WPA DHCP\""
+        echo "    wpa_supplicant_enable=\"YES\""
+        echo "and put your network in /etc/wpa_supplicant.conf (see INSTALL.md)."
+        echo "Easiest:  sh config.sh --boot MySSID MyPassword"
+    fi
 fi

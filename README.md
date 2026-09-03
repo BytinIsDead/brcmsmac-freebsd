@@ -57,6 +57,27 @@ the 4313's PCI id (`14e4:4727`) and creates the `bhnd(4)` bridge chain
 itself — FreeBSD's own `bwn_pci` doesn't list the BCM4313, so without this
 front-end the module would load but nothing would ever attach.
 
+## Which tool do I run?
+
+Every tool explains itself — run `sh <tool> --help` for its full manual.
+To pick one:
+
+| You want to... | Run | What it does |
+|---|---|---|
+| Compile the driver | `sh build.sh` | Builds `if_bcm4313.ko` (`debug`, `install`, `clean`, `check` modes) |
+| Full bring-up in one shot | `sh install.sh` | Builds, installs, (re)loads the driver, creates `wlan0`, scans for networks — then offers to connect |
+| ... and keep it after a reboot | `sh install.sh boot` | Same, plus `loader.conf` / `rc.conf` boot entries |
+| Connect to Wi-Fi | `sh config.sh` | Guided scan-and-pick menu on a terminal (prompts otherwise); also one-shot, `--boot`, `--wpa`, `--ping` |
+| Diagnose a problem | `sh diag.sh` | Prints a labeled report to paste into an issue |
+
+Fastest path from a fresh checkout to online, one command at a time:
+
+```sh
+sh build.sh                        # 1. compile -> if_bcm4313.ko
+sh install.sh                      # 2. load the driver, create wlan0, scan
+sh config.sh MySSID MyPassword     # 3. join your network + DHCP
+```
+
 Full walkthrough (including custom `KERNCONF` builds and Wi-Fi setup) is in
 [`INSTALL.md`](INSTALL.md).
 

@@ -14,6 +14,28 @@ fb_fail() { echo "   [FAIL] $*" >&2; }
 fb_warn() { echo "   [WARN] $*" >&2; }
 fb_die()  { echo "ERROR: $*" >&2; exit 1; }
 
+# fb_usage: print this script's leading "#" comment block -- its usage/help
+# text.  Every tool shows the same text for -h/--help and on bad arguments,
+# so the header comment stays the single source of truth for the manual.
+fb_usage() {
+    tail -n +2 "$0" | sed -n '/^#/p; /^[^#]/q' | sed 's/^# \{0,1\}//'
+}
+
+# fb_ask <prompt>: interactive y/N question.  Returns 0 only for an explicit
+# "y/yes" on a real terminal; when stdin/stdout are not terminals (piped,
+# scripted) or NO_TUI is set, it answers "no" so scripts never hang or ask
+# questions no one can answer.
+fb_ask() {
+    [ -t 0 ] && [ -t 1 ] || return 1
+    [ -z "${NO_TUI:-}" ] || return 1
+    printf '%s [y/N] ' "$1"
+    read _fb_ans
+    case "$_fb_ans" in
+    y|Y|yes|YES) return 0 ;;
+    *) return 1 ;;
+    esac
+}
+
 # --- sanity checks -------------------------------------------------------------
 # fb_sane_os: must run on FreeBSD (cheap to call from every script).
 fb_sane_os() {

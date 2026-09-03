@@ -164,6 +164,13 @@ make SYSDIR=/usr/src/sys install    # copies if_bcm4313.ko into /boot/kernel
 if_bcm4313_load="YES"
 ```
 
+Prefer to keep everything in `rc.conf` instead? One `sysrc` line does the
+same job (the `kld` startup script loads the module at boot):
+
+```sh
+sysrc kld_list+=if_bcm4313
+```
+
 The bridge-chain modules are pulled in automatically by the module's
 dependencies.
 
@@ -194,6 +201,11 @@ base interface before it).
 > the old module first.
 
 ## Step 5 — Connect to Wi-Fi
+
+> **Prefer a guided tool?** `sh config.sh` does this whole step for you: it
+> scans for networks, prompts for the password, runs DHCP and can persist
+> the connection across reboots (`--boot`). The manual steps below are what
+> it runs under the hood.
 
 **1. Create a wireless interface** over the driver's base interface
 (`<base_if>` is whatever the driver registered, e.g. `wlan0` if it's already
@@ -250,9 +262,11 @@ Now `service netif restart` (or a reboot) brings up Wi-Fi by itself.
 | `bcm43130: unsupported PHY type 15 (rev 15)` | Reading `PHYVER` as `0xFFFF` — the PHY registers aren't readable at probe time (type 15 = all-ones). Fixed in current code: attach brings the core out of reset with `PHYCLOCK_ENABLE \| SUPPORT_G` and *no* `PHYRESET`, exactly matching brcmsmac's `wlc_phy_attach()` (which enables the core with `SICF_GMODE \| SICF_PCLKE` before reading phyversion). | `git pull` and rebuild. |
 | `bcm43130: watchdog timeout: resetting MAC` then `BCMA_DMP_RESETSTATUS timeout` / `core reset failed: 60` | TX-status FIFO filled, then the recovery reset hit masters still holding the backplane | Three bugs, all fixed: (1) TX statuses were only drained on the RX interrupt (`MI_DMAINT`) — the `MI_TFS` (1<<29) status-pending bit was never masked in or handled, so the status FIFO filled and TX wedged; (2) the watchdog then reset the core while the D11 PSM was still running/hung; (3) the DMA engines were never properly disarmed before the core reset — clearing the DMA64 control register does not stop an engine mid-transaction, so its master stayed on the backplane and the DMP handshake never completed. Current code drains statuses on `MI_TFS`, halts the PSM (`PSM_JMP_0`, MAC+PSM run dropped) before `bhnd_reset_hw()`, and `bcm4313_ring_stop()` now performs the full brcmsmac disarm sequence (TX: suspend request -> leave active states -> disable -> DISABLED; RX: disable -> DISABLED; then 300us drain). | `git pull` and rebuild — recovery is now a clean re-init instead of a dead card. |
 | `bcm43130: PSM microcode watchdog fired; MAC stopped, re-up to recover` | The D11 PSM (ucode) wedged — same condition brcmsmac treats as fatal | The driver halts the MAC, drops the running flag and unmasks `MI_GP0`; it deliberately does *not* auto-reset in a loop (repeated core resets on a fresh wedge grind the card into DMP timeouts). Recover with `ifconfig wlan0 down && ifconfig wlan0 up`; `init_locked()` restores the full interrupt mask. If this repeats, the underlying cause is the TX-status path — capture `dmesg | tail -30` and open an issue with it. | `git pull` and rebuild; re-up the interface. |
+| `bcm43130: DMA fifo N: …; DMA engine error; resetting MAC` | A DMA engine faulted (descriptor/data/protocol error, RX fifo overflow or TX fifo underflow). Polled once per second from the watchdog, mirroring brcmsmac's `brcms_b_fifoerrors()` | The driver clears the latched bits and resets the MAC exactly like a watchdog timeout. A one-off is self-healing; if it recurs constantly, capture `dmesg | tail -30` — persistent descriptor errors usually mean a ring/descriptor bug worth an issue. | `git pull` and rebuild if the driver is older than the DMA-error watchdog; report if it repeats. |
 | `ifconfig wlan0 scan` finds no networks (attach itself is clean) | The D11 MAC is filtering beacons by BSSID during the scan | Old build: `scan_start`/`scan_end` were no-ops, so the MAC's RCM BSSID filter dropped every beacon not matching the currently programmed BSSID. Fixed in current code: `scan_start` sets `MCTL_BCNS_PROMISC` (0x00100000 — the same bit bwn's `bwn_scan_start` sets and brcmsmac raises for `FIF_BCN_PRBRESP_PROMISC`) and `scan_end` clears it. | `git pull` and rebuild. If still nothing, run `dmesg | tail -30` after `scan` — the next suspects are probe-request TX status handling and RX DMA. |
 | `ifconfig` shows nothing | The interface is simply down | Plain `ifconfig` hides down interfaces — use `ifconfig -a`. The base device is named `bcm43130` (from the module name), then `ifconfig wlan0 create wlandev bcm43130`. |
 | `ifconfig` has no `wlan` | `wlan(4)` missing | Built into GENERIC; only a custom kernel without `device wlan` needs `kldload wlan`. |
+| `bcm43130: hardware radio disabled (RF kill switch)` | The laptop's RF kill switch / Fn key is blocking the radio; the driver refused to start or stopped the MAC | Flip the switch, then `ifconfig wlan0 down && ifconfig wlan0 up`. An empty scan on a 4313 laptop is usually this, not a driver bug — `sysctl dev.bcm4313.0.rfkill` reads `1` while blocked. |
 | Loads but Wi-Fi is flaky | Usually SPROM/tuning issues | Set `sysctl dev.bcm4313.0.debug=2` (runtime, no rebuild) and collect `dmesg` output for a report. |
 | **No attach at all** | Chip isn't BCM4313 | If it's a BCM943142HM/BCM43142 (FullMAC), this softMAC driver can't drive it — see the note at the top. |
 
@@ -264,12 +278,14 @@ Runtime sysctls on the device node, no debug build needed:
 |---|---|
 | `dev.bcm4313.0.debug` | `0` quiet (default), `1` logs scan start/end, `2` also logs every channel hop |
 | `dev.bcm4313.0.fwinfo` | chip/PHY/radio identity read from SPROM at attach |
+| `dev.bcm4313.0.rfkill` | `1` = the hardware RF kill switch has disabled the radio (the driver stops the MAC); `0` = radio on |
 | `dev.bcm4313.0.txframes` | frames posted to the DMA TX ring |
 | `dev.bcm4313.0.rxframes` | frames actually delivered to net80211 |
 | `dev.bcm4313.0.txdone` | TX statuses harvested from the status ring |
-| `dev.bcm4313.0.wdogfires` | watchdog resets + PSM watchdog events |
+| `dev.bcm4313.0.wdogfires` | watchdog resets (TX timeout or DMA engine fault) + PSM watchdog events |
 | `dev.bcm4313.0.dmatx` / `dmarx` / `dmatxstatus` | live ring producer/consumer positions |
 | `dev.bcm4313.0.intrmask` | current MAC interrupt mask |
+| `dev.bcm4313.0.calticks` / `callastfull` / `calsample` / `calfires` | periodic temperature-based TX-power recalibration loop: `calticks` climbs 1/s while the MAC is up, `calsample` counts samples taken since the last recalibration, `calfires` counts glacial recalibrations (~1 per 3–4 min on tempsense boards) — soak-test with these |
 
 Bring the interface up, then: `rxframes` must climb as beacons arrive during a
 scan, and `txdone` should track `txframes` once TX is moving. If `rxframes`

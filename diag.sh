@@ -1,11 +1,32 @@
 #!/bin/sh
 # diag.sh -- collect a labeled bring-up report for if_bcm4313 on FreeBSD.
-# Usage (as root):  sh diag.sh
-# Paste the entire output back into your report.
+#
+# Usage (as root):
+#   sh diag.sh           # print the report
+#   sh diag.sh --help    # this text
+#
+# It gathers the kernel modules, device tree, PCI info, net80211 devices,
+# driver sysctls and recent dmesg lines -- each under a labeled heading --
+# and prints them to stdout.  Paste the entire output into your report.
+#
+# When to run it:
+#   - after `sh install.sh` if the driver did not attach
+#   - when `sysctl net.wlan.devices` shows no bcm4313* after kldload
+#   - before opening an issue: run it and paste everything
 
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/lib.sh"
+
+case "${1:-}" in
+-h|--help) fb_usage; exit 0 ;;
+"") ;;
+*)
+    echo "ERROR: diag.sh takes no arguments (found '$1')" >&2
+    echo "       full usage: sh diag.sh --help" >&2
+    exit 1
+    ;;
+esac
 
 fb_sane_os
 fb_ensure_driver
