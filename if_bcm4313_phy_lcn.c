@@ -3673,6 +3673,9 @@ bcm4313_lcnphy_glacial_timer_based_cal(struct bcm4313_softc *sc)
 	if (!suspend)
 		bcm4313_lcnphy_suspend(sc);
 	bcm4313_lcnphy_deaf_mode(sc, true);
+	/* Re-arm the periodic recalibration loop (upstream:
+	 * pi->phy_lastcal = pi->sh->now). */
+	lcn->lcnphy_lastcal = lcn->lcnphy_now;
 	index = lcn->lcnphy_current_index;
 
 	bcm4313_lcnphy_txpwrtbl_iqlo_cal(sc);
@@ -3696,6 +3699,9 @@ bcm4313_lcnphy_periodic_cal(struct bcm4313_softc *sc)
 	int32_t tssi, pwr, mintargetpwr;
 	struct bcm4313_lcnphy *lcn = &sc->sc_lcn;
 
+	/* Re-arm the periodic recalibration loop (upstream:
+	 * pi->phy_lastcal = pi->sh->now). */
+	lcn->lcnphy_lastcal = lcn->lcnphy_now;
 	lcn->lcnphy_full_cal_channel = sc->sc_curchan;
 	index = lcn->lcnphy_current_index;
 
@@ -3770,6 +3776,7 @@ bcm4313_lcnphy_calib_modes(struct bcm4313_softc *sc, uint32_t mode)
 			    (temp_diff > 60) || (temp_diff < -60)) {
 				bcm4313_lcnphy_glacial_timer_based_cal(sc);
 				bcm4313_2064_vco_cal(sc);
+				lcn->lcnphy_glacial_fires++;
 				lcn->lcnphy_cal_temper = temp_new;
 				lcn->lcnphy_cal_counter = 0;
 			} else
@@ -3781,6 +3788,40 @@ bcm4313_lcnphy_calib_modes(struct bcm4313_softc *sc, uint32_t mode)
 			bcm4313_lcnphy_tx_power_adjustment(sc);
 		break;
 	}
+}
+
+/* wlc_phy_watchdog() -- LCN branch (phy_cmn.c).  Called once per second
+ * from bcm4313_watchdog() while the MAC is up. */
+void
+bcm4313_lcnphy_watchdog(struct bcm4313_softc *sc)
+{
+	struct bcm4313_lcnphy *lcn = &sc->sc_lcn;
+
+	/* One per-second tick while the MAC is up (upstream sh->now). */
+	lcn->lcnphy_now++;
+
+	/*
+	 * Defer while net80211 is hopping channels (upstream returns early
+	 * for SCAN_RM_IN_PROGRESS / ASSOC_INPROG_PHY).  This port tracks
+	 * scans only: between scan_end and S_RUN net80211 does not move the
+	 * channel, so there is no separate association window to exclude.
+	 */
+	if (sc->sc_flags & BCM4313_FLAG_SCAN)
+		return;
+
+	/*
+	 * Re-evaluate once PHY_SW_TIMER_GLACIAL has elapsed since the last
+	 * full calibration, then every second until a glacial calibration
+	 * re-arms the timer.  On boards without temperature-based power
+	 * control the calib modes below self-gate and this is a no-op.
+	 */
+	if (lcn->lcnphy_now - lcn->lcnphy_lastcal <
+	    BCM4313_LCNPHY_CAL_INTERVAL)
+		return;
+
+	bcm4313_lcnphy_calib_modes(sc,
+	    BCM4313_LCNPHY_PERICAL_TEMPBASED_TXPWRCTRL);
+	bcm4313_lcnphy_calib_modes(sc, BCM4313_LCNPHY_PERICAL_WATCHDOG);
 }
 
 /* wlc_lcnphy_tx_power_adjustment(). */

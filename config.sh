@@ -7,6 +7,9 @@
 #   sh config.sh --boot MySSID MyPassword         # join now + reconnect at boot
 #   sh config.sh --wpa /etc/wpa_supplicant.conf   # join via wpa_supplicant
 #   sh config.sh --ping MySSID MyPassword         # join, then ping-test the link
+#   sh config.sh --help                           # this text (all options)
+#
+# Problems after connecting?  sh diag.sh prints a labeled report to paste.
 #
 # Inline `wpakey` mode works for WPA/WPA2-PSK (no wpa_supplicant needed for
 # the live session).  Boot persistence always writes a real
@@ -45,10 +48,11 @@ while [ $# -gt 0 ]; do
                    }
                    WPA_CONF="$1" ;;
     --ping)        PING=1 ;;
-    -h|--help)     sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)     fb_usage; exit 0 ;;
     --*)
         echo "ERROR: unknown option '$1'" >&2
-        echo "       usage: sh config.sh [--boot] [--ping] [--wpa FILE] [SSID PASSWORD]"
+        echo "       usage: sh config.sh [--boot] [--ping] [--wpa FILE] [SSID PASSWORD]" >&2
+        echo "       full usage: sh config.sh --help" >&2
         exit 1
         ;;
     *)
@@ -207,7 +211,14 @@ if [ -z "$SSID" ] && [ -z "$WPA_CONF" ]; then
     printf "SSID: "
     read SSID
 fi
-[ -n "$SSID" ] || [ -n "$WPA_CONF" ] || die "no SSID given."
+[ -n "$SSID" ] || [ -n "$WPA_CONF" ] || {
+    die "no SSID given.
+
+Usage:  sh config.sh MySSID MyPassword      (one-shot connect + DHCP)
+        sh config.sh --boot MySSID MyPassword  (+ reconnect at boot)
+Run it on a terminal with no arguments for the guided prompts.
+Full usage: sh config.sh --help"
+}
 if [ -z "$WPA_CONF" ] && [ -z "$PASS" ]; then
     printf "WPA password (hidden; empty = open network): "
     stty -echo 2>/dev/null
@@ -329,4 +340,7 @@ else
     [ -n "$gw" ] && echo "==> default route: $gw"
     echo
     echo "Done. Quick checks:  ifconfig $WLANIF   |   ping -c3 8.8.8.8"
+    if [ "$MODE" != "boot" ]; then
+        echo "Reconnect automatically after a reboot:  sh config.sh --boot \"$SSID\" <password>"
+    fi
 fi

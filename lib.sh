@@ -14,6 +14,28 @@ fb_fail() { echo "   [FAIL] $*" >&2; }
 fb_warn() { echo "   [WARN] $*" >&2; }
 fb_die()  { echo "ERROR: $*" >&2; exit 1; }
 
+# fb_usage: print this script's leading "#" comment block -- its usage/help
+# text.  Every tool shows the same text for -h/--help and on bad arguments,
+# so the header comment stays the single source of truth for the manual.
+fb_usage() {
+    tail -n +2 "$0" | sed -n '/^#/p; /^[^#]/q' | sed 's/^# \{0,1\}//'
+}
+
+# fb_ask <prompt>: interactive y/N question.  Returns 0 only for an explicit
+# "y/yes" on a real terminal; when stdin/stdout are not terminals (piped,
+# scripted) or NO_TUI is set, it answers "no" so scripts never hang or ask
+# questions no one can answer.
+fb_ask() {
+    [ -t 0 ] && [ -t 1 ] || return 1
+    [ -z "${NO_TUI:-}" ] || return 1
+    printf '%s [y/N] ' "$1"
+    read _fb_ans
+    case "$_fb_ans" in
+    y|Y|yes|YES) return 0 ;;
+    *) return 1 ;;
+    esac
+}
+
 # --- sanity checks -------------------------------------------------------------
 # fb_sane_os: must run on FreeBSD (cheap to call from every script).
 fb_sane_os() {
@@ -68,6 +90,10 @@ fb_ensure_driver() {
         echo "       net.wlan.devices:       $(sysctl -n net.wlan.devices 2>/dev/null)" >&2
         echo "       last bcm4313/bhnd logs: " >&2
         dmesg 2>/dev/null | grep -iE 'bcm4313|bhnd' | tail -3 | sed 's/^/         /' >&2
+        if dmesg 2>/dev/null | grep -q 'core is dead'; then
+            echo "       The driver latched a dead D11 core (DMA fault flood)." >&2
+            echo "       Reload it: kldunload if_bcm4313 && kldload $ko" >&2
+        fi
         [ -n "$ko" ] || echo "       No module found on disk -- run 'sh install.sh' first." >&2
         exit 1
     }
