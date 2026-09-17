@@ -25,7 +25,11 @@ are required at runtime.
   ported from `brcmsmac`.
 - switch-control and RX-gain tables selected at attach from **SPROM board
   flags**, with the table set reproduced byte-for-byte from upstream.
-- Microcode uploaded from the embedded `bcm4313_ucode.c` at attach.
+- D11 PSM bring-up matches brcmsmac's `brcms_b_coreinit()`: microcode
+  upload, `MCTL_PSM_RUN` release and the `MI_MACSSPNDD` self-suspend
+  handshake, re-run after every core reset.
+- Microcode uploaded from the embedded `bcm4313_ucode.c` (at attach, and
+  again after each core reset).
 - Verified to **compile** clean against FreeBSD 14.2, **15.1-RELEASE** and
   current (`main`) kernel headers (see [`COMPATIBILITY.md`](COMPATIBILITY.md)).
 

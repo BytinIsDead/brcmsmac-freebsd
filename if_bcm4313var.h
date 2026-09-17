@@ -115,6 +115,7 @@ MALLOC_DECLARE(M_BCM4313);
 
 /* maccontrol bits (MCTL_*). */
 #define	BCM4313_MCTL_GMODE		(1U << 31)
+#define	BCM4313_MCTL_WAKE		(1 << 26)
 #define	BCM4313_MCTL_PROMISC		(1 << 24)
 #define	BCM4313_MCTL_KEEPBADFCS		(1 << 23)
 #define	BCM4313_MCTL_KEEPCONTROL	(1 << 22)
@@ -122,6 +123,7 @@ MALLOC_DECLARE(M_BCM4313);
 #define	BCM4313_MCTL_BCNS_PROMISC	(1 << 20)
 #define	BCM4313_MCTL_AP			(1 << 18)
 #define	BCM4313_MCTL_INFRA		(1 << 17)
+#define	BCM4313_MCTL_IHR_EN		(1 << 10)
 #define	BCM4313_MCTL_SHM_EN		(1 << 8)
 #define	BCM4313_MCTL_PSM_JMP_0		(1 << 2)
 #define	BCM4313_MCTL_PSM_RUN		(1 << 1)

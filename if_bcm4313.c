@@ -96,9 +96,11 @@ SYSCTL_INT(_hw_bcm4313, OID_AUTO, debug, CTLFLAG_RWTUN, &bcm4313_debug, 0,
  */
 static void	bcm4313_ring_free(struct bcm4313_ring *);
 static void	bcm4313_rx_refill(struct bcm4313_softc *, struct bcm4313_ring *);
+static void	bcm4313_set_macaddr(struct bcm4313_softc *, const uint8_t *);
 static void	bcm4313_tx_reclaim(struct bcm4313_softc *,
 		    struct bcm4313_ring *, int);
 static void	bcm4313_init_locked(struct bcm4313_softc *);
+static int	bcm4313_psm_start_locked(struct bcm4313_softc *);
 static void	bcm4313_sysctl_setup(struct bcm4313_softc *);
 static void	bcm4313_stop_locked(struct bcm4313_softc *);
 static int	bcm4313_detach(device_t);
@@ -1184,16 +1186,144 @@ bcm4313_ucode_download(struct bcm4313_softc *sc)
  * MAC control.
  * ---------------------------------------------------------------------------
  */
+
+/*
+ * Start the D11 PSM (microcode) and wait for it to reach its auto-init
+ * suspended state -- brcmsmac brcms_b_coreinit():
+ *
+ *	reset PSM state  mctrl  = MCTL_IHR_EN | MCTL_PSM_JMP_0 | MCTL_WAKE
+ *	download ucode   bcm4313_ucode_download()
+ *	run the PSM      mctrl  = MCTL_IHR_EN | [MCTL_GMODE | MCTL_INFRA |]
+ *	                          MCTL_PSM_RUN | MCTL_WAKE
+ *	wait             MI_MACSSPNDD (ucode self-suspend handshake)
+ *
+ * Each bit is load-bearing and none of them were set before:
+ *
+ *  - MCTL_IHR_EN  opens the indirect-host-register window the ucode and
+ *                 the SHM/OBJADDR accesses rely on.
+ *  - MCTL_WAKE    keeps the PSM from dozing off the host's clock request.
+ *  - MCTL_PSM_RUN releases the PSM.  Without it the microcode stays parked
+ *                 at MCTL_PSM_JMP_0 = 0 forever: the MAC reads as enabled
+ *                 in net80211 and does absolutely nothing -- no beacons, no
+ *                 TX, no RX -- which is the "interface is up and the
+ *                 network doesn't work" symptom, followed by a PSM
+ *                 watchdog `ifconfig up` that wedges the chip.
+ *  - MI_MACSSPNDD is the only positive proof the ucode is alive and has
+ *                 taken the PSM; brcmsmac spins 1s for it.
+ *
+ * A core that returns 0xffffffff from every register has fallen off the
+ * backplane; resetting it again only produces the timeout loop, so that is
+ * reported instead of retried.
+ *
+ * Returns 0 once the ucode is suspended and ready for SHM configuration.
+ */
+static int
+bcm4313_psm_start_locked(struct bcm4313_softc *sc)
+{
+	uint32_t mc, status = 0;
+	int i;
+
+	BCM4313_ASSERT_LOCKED(sc);
+
+	/* Drop stale status bits before the PSM is released. */
+	bcm4313_write_4(sc, BCM4313_D11_MACINTSTATUS, 0xffffffff);
+
+	/* Hold the PSM at 0 with the host register window open. */
+	bcm4313_write_4(sc, BCM4313_D11_MACCONTROL,
+	    BCM4313_MCTL_IHR_EN | BCM4313_MCTL_PSM_JMP_0 | BCM4313_MCTL_WAKE);
+
+	/*
+	 * The core was just reset, so the microcode RAM must be reloaded
+	 * (brcms_b_coreinit() downloads after the reset too).  Forcing the
+	 * flag keeps this correct even when attach() already uploaded once.
+	 */
+	sc->sc_ucode_loaded = 0;
+	if (bcm4313_ucode_download(sc) != 0)
+		return (EIO);
+
+	/* Release the PSM: BSS STA mode, running, woken. */
+	mc = BCM4313_MCTL_IHR_EN | BCM4313_MCTL_GMODE | BCM4313_MCTL_PSM_RUN |
+	    BCM4313_MCTL_WAKE;
+	if (sc->sc_ic.ic_opmode == IEEE80211_M_STA)
+		mc |= BCM4313_MCTL_INFRA;
+	bcm4313_write_4(sc, BCM4313_D11_MACCONTROL, mc);
+
+	/* Wait for the ucode to power up and park itself (brcmsmac: 1s). */
+	for (i = 0; i < 100000; i++) {
+		status = bcm4313_read_4(sc, BCM4313_D11_MACINTSTATUS);
+		if (status == 0xffffffff) {
+			device_printf(sc->sc_dev,
+			    "D11 core is not responding (macintstatus "
+			    "0xffffffff) -- reset cannot help, power-cycle\n");
+			return (EIO);
+		}
+		if (status & BCM4313_MI_MACSSPNDD) {
+			/*
+			 * The ucode applied its own initvals (register and SHM
+			 * locations) on the way up.  Re-apply the driver's view of
+			 * the SHM window on top, so those word writes cannot clobber
+			 * MAXRXFRM_LEN/SLOT/CHANNEL or the RCM MAC address.
+			 */
+			bcm4313_shm_write_2(sc, BCM4313_M_MACHW_VER,
+			    BCM4313_D11_HWREV);
+			bcm4313_shm_write_2(sc, BCM4313_M_MAXRXFRM_LEN, 2346);
+			bcm4313_shm_write_2(sc, BCM4313_M_DOT11_SLOT,
+			    (sc->sc_ic.ic_flags & IEEE80211_F_SHSLOT) ? 9 : 20);
+			bcm4313_shm_write_2(sc, BCM4313_M_CURCHANNEL,
+			    sc->sc_curchan);
+			bcm4313_set_macaddr(sc, sc->sc_ic.ic_macaddr);
+			return (0);
+		}
+		DELAY(10);
+	}
+	device_printf(sc->sc_dev,
+	    "ucode did not self-suspend (macintstatus %#x maccontrol %#x)\n",
+	    status, bcm4313_read_4(sc, BCM4313_D11_MACCONTROL));
+	return (EIO);
+}
+
+/*
+ * Bring the MAC alive (brcmsmac brcms_c_enable_mac()):
+ *
+ *	1. make sure the D11 PSM is actually executing.  MCTL_PSM_RUN == 0
+ *	   means the core was just reset (or the MAC was taken down), so the
+ *	   microcode has to be reloaded and released before anything the MAC
+ *	   does can work.  This is the one place every bring-up path passes
+ *	   through -- brcmsmac does the same work in brcms_b_coreinit().
+ *	2. set MCTL_EN_MAC on top of the running PSM without disturbing
+ *	   MCTL_IHR_EN / MCTL_WAKE / MCTL_PSM_RUN.
+ *	3. clear the ucode's MI_MACSSPNDD parked indication.
+ *
+ * If the PSM cannot be started the MAC is deliberately left stopped: a D11
+ * with no running ucode silently discards everything, and failing here is
+ * what stops the watchdog from resetting a chip that is already wedged.
+ */
 void
 bcm4313_mac_enable(struct bcm4313_softc *sc)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
 	uint32_t mc;
 
-	mc = BCM4313_MCTL_EN_MAC | BCM4313_MCTL_GMODE;
+	mc = bcm4313_read_4(sc, BCM4313_D11_MACCONTROL);
+	if ((mc & BCM4313_MCTL_PSM_RUN) == 0) {
+		if (bcm4313_psm_start_locked(sc) != 0) {
+			BCM4313_DPRINTF(sc, "PSM not running; MAC left off\n");
+			return;
+		}
+		mc = bcm4313_read_4(sc, BCM4313_D11_MACCONTROL);
+	}
+
+	mc |= BCM4313_MCTL_EN_MAC | BCM4313_MCTL_IHR_EN | BCM4313_MCTL_WAKE |
+	    BCM4313_MCTL_GMODE | BCM4313_MCTL_PSM_RUN;
+	mc &= ~BCM4313_MCTL_PSM_JMP_0;
 	if (ic->ic_opmode == IEEE80211_M_STA)
 		mc |= BCM4313_MCTL_INFRA;
+	else
+		mc &= ~BCM4313_MCTL_INFRA;
 	bcm4313_write_4(sc, BCM4313_D11_MACCONTROL, mc);
+
+	/* Clear the ucode's parked indication now that the MAC is enabled. */
+	bcm4313_write_4(sc, BCM4313_D11_MACINTSTATUS, BCM4313_MI_MACSSPNDD);
 }
 
 void
