@@ -87,13 +87,13 @@ fi
 # it (net80211 holds a reference).  So first destroy every wlan interface over
 # bcm4313*, then unload the old module, then load the new one.
 PCISEL=""
-if kldstat -q -m if_bcm4313; then
+if fb_kld_module_ok; then
     # Remember the PCI selector while our front-end is still attached, so the
     # card can be reset at the bus level after the unload (see below).
     PCISEL="$(fb_pci_selector)"
     fb_destroy_wlans_over 'bcm4313*'
     fb_note "unloading old if_bcm4313"
-    kldunload if_bcm4313 || kldunload if_bcm4313.ko || {
+    kldunload if_bcm4313.ko || fb_kld_release || {
         echo "ERROR: could not unload if_bcm4313." >&2
         echo "       Destroy remaining wlan interfaces over it:" >&2
         echo "         for i in \$(ifconfig -g wlan); do ifconfig \$i destroy; done" >&2
@@ -101,12 +101,12 @@ if kldstat -q -m if_bcm4313; then
     }
     sleep 1
     # --- redundant: kldunload can exit 0 while the module lingers (refs) -----
-    if kldstat -q -m if_bcm4313; then
-        fb_warn "if_bcm4313 still listed after unload; retrying once..."
+    if fb_kld_module_ok; then
+        fb_warn "if_bcm4313 still registered after unload; retrying once..."
         sleep 2
-        kldunload if_bcm4313 2>/dev/null || kldunload if_bcm4313.ko 2>/dev/null || {
+        kldunload if_bcm4313.ko 2>/dev/null || fb_kld_release || {
             echo "ERROR: module is still pinned. What holds it?" >&2
-            echo "       kldstat -m if_bcm4313 ; ifconfig -g wlan" >&2
+            echo "       kldstat -m bhnd/if_bcm4313 ; ifconfig -g wlan" >&2
             exit 1
         }
     fi
@@ -144,7 +144,7 @@ kldload "$KO" || kldload if_bcm4313 || \
 sleep 1
 
 # --- redundant: confirm the module is really loaded ---------------------------
-kldstat -q -m if_bcm4313 || fb_die "kldload reported success but the module is not in kldstat."
+fb_kld_module_ok || fb_die "kldload reported success but module bhnd/if_bcm4313 is not in kldstat."
 
 # --- find the net80211 device, with one attach retry -------------------------
 attempt=0
@@ -152,7 +152,7 @@ while [ "$attempt" -lt 2 ]; do
     WLDEV="$(fb_find_wldev)"
     [ -n "$WLDEV" ] && break
     echo "==> bcm43130 not attached yet; reloading and waiting (attempt $((attempt + 1))/2)..."
-    kldunload if_bcm4313 2>/dev/null
+    kldunload if_bcm4313.ko 2>/dev/null || fb_kld_release
     sleep 1
     kldload if_bcm4313 2>/dev/null
     sleep 3
@@ -202,7 +202,7 @@ echo
 
 # --- summary -----------------------------------------------------------------
 echo "==> final self-check:"
-kldstat -q -m if_bcm4313 && fb_ok "module if_bcm4313 loaded" || fb_fail "module not loaded"
+fb_kld_module_ok && fb_ok "module bhnd/if_bcm4313 loaded" || fb_fail "module not loaded"
 if sysctl -n net.wlan.devices 2>/dev/null | grep -q '^bcm4313'; then
     fb_ok "device $WLDEV attached"
 else

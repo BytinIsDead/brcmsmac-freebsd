@@ -42,8 +42,8 @@ for m in bhnd bhndb bhndb_pci bcma_bhndb siba_bhndb; do
 done
 echo
 echo "===== loaded modules ====="
-for m in bhnd bhndb bhndb_pci bcma_bhndb siba_bhndb if_bcm4313; do
-    kldstat -m $m 2>&1
+for m in bhnd bhndb bhndb_pci bcma_bhndb siba_bhndb 'bhnd/if_bcm4313'; do
+    kldstat -m "$m" 2>&1
 done
 echo
 echo "===== device tree: did the PCI front-end build the bhnd chain? ====="

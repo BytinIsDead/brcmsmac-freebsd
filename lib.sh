@@ -74,7 +74,7 @@ fb_find_ko() {
 # failed ("core reset failed") and the dmesg tail shows why.
 fb_ensure_driver() {
     local i ko
-    kldstat -q -m if_bcm4313 && return 0
+    fb_kld_module_ok && return 0
     if fb_kld_stuck; then
         fb_warn "if_bcm4313.ko is resident without a registered driver module"
         if ! fb_kld_release; then
@@ -93,15 +93,15 @@ fb_ensure_driver() {
             sleep 1
         done
     fi
-    kldstat -q -m if_bcm4313 || {
+    fb_kld_module_ok || {
         echo "ERROR: if_bcm4313 is not loaded${ko:+ (tried: $ko)}." >&2
-        echo "       kldstat -m if_bcm4313:  $(kldstat -m if_bcm4313 2>&1)" >&2
+        echo "       kldstat -m bhnd/if_bcm4313:  $(kldstat -m bhnd/if_bcm4313 2>&1)" >&2
         echo "       net.wlan.devices:       $(sysctl -n net.wlan.devices 2>/dev/null)" >&2
         echo "       last bcm4313/bhnd logs: " >&2
         dmesg 2>/dev/null | grep -iE 'bcm4313|bhnd' | tail -3 | sed 's/^/         /' >&2
         if dmesg 2>/dev/null | grep -q 'core is dead'; then
             echo "       The driver latched a dead D11 core (DMA fault flood)." >&2
-            echo "       Reload it: kldunload if_bcm4313 && kldload $ko" >&2
+            echo "       Reload it: kldunload if_bcm4313.ko && kldload $ko" >&2
         fi
         [ -n "$ko" ] || echo "       No module found on disk -- run 'sh install.sh' first." >&2
         exit 1
@@ -113,6 +113,15 @@ fb_require_tree() {
     HERE="$(cd "$(dirname "$0")" && pwd)"
     [ -f "$HERE/if_bcm4313.c" ] ||
         fb_die "run $0 from the driver directory (could not find if_bcm4313.c next to $0)"
+}
+
+# fb_kld_module_ok: is the driver module registered?  DRIVER_MODULE(name,
+# busname) registers the module as "busname/name" (sys/sys/bus.h,
+# EARLY_DRIVER_MODULE_ORDERED: moduledata .name = #busname "/" #name), so the
+# name is "bhnd/if_bcm4313" -- kldstat -m if_bcm4313 NEVER matches and made
+# every successful load look like a failure.
+fb_kld_module_ok() {
+    kldstat -q -m 'bhnd/if_bcm4313'
 }
 
 # fb_kld_stuck: the if_bcm4313.ko FILE is loaded but the driver MODULE is not
