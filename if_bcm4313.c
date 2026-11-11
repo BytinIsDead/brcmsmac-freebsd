@@ -64,6 +64,7 @@
 #include <net80211/ieee80211_crypto.h>
 #include <net80211/ieee80211_phy.h>
 #include <net80211/ieee80211_radiotap.h>
+#include <net80211/ieee80211_ratectl.h>
 #include <net80211/ieee80211_regdomain.h>
 
 #include <dev/bhnd/bhnd.h>
@@ -110,7 +111,12 @@ static int	bcm4313_ucode_download(struct bcm4313_softc *);
 #define	BCM4313_NTX_DESC		64	/* 32 frames, 2 slots each */
 #define	BCM4313_NRX_DESC		64
 #define	BCM4313_NTXSTATUS_DESC		16
-#define	BCM4313_RXBUFSZ			2048
+/*
+ * RX buffer: must hold the 38-byte DMA header region plus a full-size MPDU
+ * with PLCP and FCS (brcmsmac RXBUFSZ; 2048 would cut 2346-byte frames).
+ * MJUMPAGESIZE clusters (4096 on 4K-page architectures) are used for it.
+ */
+#define	BCM4313_RXBUFSZ			4096
 #define	BCM4313_TXBUFSZ			4096
 #define	BCM4313_TX_FRAMES		(BCM4313_NTX_DESC / 2)
 
@@ -481,9 +487,17 @@ bcm4313_ring_rx_init(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 	ring->r_in = ring->r_out = 0;
 	memset(ring->r_desc, 0, ring->r_nslots *
 	    sizeof(struct bcm4313_dma64desc));
-	/* Enable RX; frame offset 0 (inline rx header). */
+	/*
+	 * Enable RX and program the frame offset: the MAC writes the d11
+	 * rx header at offset 0 and frame data (PLCP + 802.11 + FCS) at
+	 * BCM4313_HWRXOFF -- brcmsmac _dma_rxenable() always programs
+	 * (rxoffset << D64_RC_RO_SHIFT) with rxoffset = BRCMS_HWRXOFF(38).
+	 * Without RC_RO the frame data lands on top of the rx header and
+	 * every harvested frame parses as garbage.
+	 */
 	bcm4313_write_4(sc, ring->r_base + BCM4313_DMA64_CTL,
-	    BCM4313_D64_RC_RE | BCM4313_D64_RC_PD);
+	    ((BCM4313_HWRXOFF << BCM4313_D64_RC_RO_SHIFT) &
+	    BCM4313_D64_RC_RO_MASK) | BCM4313_D64_RC_RE | BCM4313_D64_RC_PD);
 	pa = bcm4313_dma_addr(sc, ring->r_paddr);
 	bcm4313_write_4(sc, ring->r_base + BCM4313_DMA64_ADDRLOW,
 	    (uint32_t)pa);
@@ -578,7 +592,17 @@ bcm4313_rx_refill(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 	n = ring->r_nslots - 1 - active;
 	for (i = 0; i < n; i++) {
 		slot = &ring->r_slots[ring->r_out];
-		m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
+		/*
+		 * 2KB clusters for the small TX-status ring; page-size jumbo
+		 * clusters for the data RX ring (BCM4313_RXBUFSZ = 4096 does
+		 * not fit MCLBYTES).  Requires a 4K-page architecture, which
+		 * every bhnd PCIe host is.
+		 */
+		if (ring->r_bufsz <= MCLBYTES)
+			m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
+		else
+			m = m_getjcl(M_NOWAIT, MT_DATA, M_PKTHDR,
+			    MJUMPAGESIZE);
 		if (m == NULL) {
 			sc->sc_rxnobuf++;
 			break;
@@ -651,7 +675,23 @@ bcm4313_tx_reclaim(struct bcm4313_softc *sc, struct bcm4313_ring *ring,
 }
 
 /*
+ * LCN-PHY packet RSSI gain-index correction (brcmsmac phy_cmn.c
+ * lcnphy_gain_index_offset_for_pkt_rssi, byte-for-byte).  Indexed by the
+ * RX gain index the ucode reports in PhyRxStatus_2 bits 15:10.
+ */
+static const int8_t bcm4313_lcn_gidx_pkt_rssi[] = {
+	8, 8, 8, 8, 8, 8, 8, 9, 10, 8, 8, 7, 7, 1,
+	2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+	1, 1, 0, 0, 0, 0
+};
+
+/*
  * Harvest received frames from an RX ring and feed them to net80211.
+ *
+ * Buffer layout (brcmsmac brcms_c_recv/brcms_c_recvctl, see
+ * if_bcm4313var.h): [0,38) d11 rx header region, [+2 pad if RXS_PBPRES],
+ * [+6 PLCP] [802.11 frame] [+4 FCS]; RxFrameSize counts everything after
+ * the header region.
  */
 static void
 bcm4313_rx_harvest(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
@@ -663,8 +703,8 @@ bcm4313_rx_harvest(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 	struct bcm4313_slot *slot;
 	struct mbuf *m;
 	uint32_t hw;
-	uint16_t rxlen, rxs1, rxs2;
-	int rssi;
+	uint16_t rxlen, macrxs1, macrxs2, prxs1, prxs2;
+	int gidx, rssi;
 	int i;
 
 	hw = (bcm4313_read_4(sc, ring->r_base + BCM4313_DMA64_STATUS0) &
@@ -680,28 +720,71 @@ bcm4313_rx_harvest(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 			bus_dmamap_unload(sc->sc_bufdtag, slot->s_dmap);
 			rxh = mtod(m, struct bcm4313_d11rxhdr *);
 			rxlen = le16toh(rxh->RxFrameSize);
-			rxs1 = le16toh(rxh->RxStatus1);
-			rxs2 = le16toh(rxh->PhyRxStatus_2);
-			if (rxlen < IEEE80211_MIN_LEN ||
-			    rxlen > ring->r_bufsz - BCM4313_D11_RXH_LEN ||
-			    (rxs1 & BCM4313_RXS_FCSERR) != 0) {
+			macrxs1 = le16toh(rxh->RxStatus1);
+			macrxs2 = le16toh(rxh->RxStatus2);
+			prxs1 = le16toh(rxh->PhyRxStatus_1);
+			prxs2 = le16toh(rxh->PhyRxStatus_2);
+			if (rxlen < BCM4313_D11_PHY_HDR_LEN +
+			    IEEE80211_MIN_LEN + BCM4313_FCS_LEN ||
+			    rxlen > ring->r_bufsz - BCM4313_HWRXOFF ||
+			    (macrxs1 & BCM4313_RXS_FCSERR) != 0) {
 				/* Giant / short / bad-FCS: drop. */
-				if (rxlen > ring->r_bufsz - BCM4313_D11_RXH_LEN)
+				if (rxlen > ring->r_bufsz - BCM4313_HWRXOFF)
 					sc->sc_rxgiants++;
 				m_freem(m);
 				counter_u64_add(ic->ic_ierrors, 1);
 				goto next;
 			}
-			/* Strip the rx header, trim to frame length. */
-			m->m_pkthdr.len = rxlen + BCM4313_D11_RXH_LEN;
-			m_adj(m, -(MCLBYTES - (rxlen + BCM4313_D11_RXH_LEN)));
-			m_adj(m, BCM4313_D11_RXH_LEN);
+			/* A-MSDU reassembly is not supported (upstream toss). */
+			if ((macrxs2 & BCM4313_RXS_AMSDU) != 0) {
+				sc->sc_rxamsdu++;
+				m_freem(m);
+				counter_u64_add(ic->ic_ierrors, 1);
+				goto next;
+			}
+			/* Frame length after the DMA header region; set both
+			 * lengths directly (the cluster holds the whole
+			 * frame), then strip the layers: rx header region,
+			 * QoS pad, PLCP, FCS. */
+			m->m_pkthdr.len = m->m_len =
+			    BCM4313_HWRXOFF + rxlen;
+			m_adj(m, BCM4313_HWRXOFF);
+			if ((macrxs1 & BCM4313_RXS_PBPRES) != 0) {
+				/* QoS/A-MSDU/a4 header pad (2 bytes). */
+				if (m->m_pkthdr.len < 2 + IEEE80211_MIN_LEN) {
+					m_freem(m);
+					counter_u64_add(ic->ic_ierrors, 1);
+					goto next;
+				}
+				m_adj(m, 2);
+				sc->sc_rxpad++;
+			}
+			m_adj(m, BCM4313_D11_PHY_HDR_LEN);
+			m_adj(m, -BCM4313_FCS_LEN);
 			/*
-			 * RSSI from HTPHY/LCN Rx power (antenna 0) in
-			 * PhyRxStatus_2; sign/scale per brcmsmac's
-			 * wlc_lcnphy_rx_signal_strength().
+			 * RSSI per brcmsmac wlc_phy_rssi_compute() LCNPHY
+			 * branch: JSSI from PhyRxStatus_1 (signed), corrected
+			 * by the gain index from PhyRxStatus_2 and the slope
+			 * constant (lcnphy_pkteng_rssi_slope is always 0
+			 * here).  Without a valid PHY rx status the reading
+			 * is meaningless (upstream reports RSSI_INVALID).
 			 */
-			rssi = -(int)((rxs2 & BCM4313_PRXS2_HTPHY_RXPWR_ANT0) >> 8);
+			if ((macrxs2 & BCM4313_RXS_PHYRXST_VALID) == 0) {
+				sc->sc_rssiinvalid++;
+				rssi = -128;
+			} else {
+				gidx = (prxs2 & BCM4313_PRXS2_GIDX_MASK) >>
+				    BCM4313_PRXS2_GIDX_SHIFT;
+				if (gidx >= (int)nitems(bcm4313_lcn_gidx_pkt_rssi))
+					gidx = nitems(bcm4313_lcn_gidx_pkt_rssi) - 1;
+				rssi = prxs1 & BCM4313_PRXS1_JSSI_MASK;
+				if (rssi > 127)
+					rssi -= 256;
+				rssi += bcm4313_lcn_gidx_pkt_rssi[gidx];
+				if (rssi > -46 && gidx > 18)
+					rssi += 7;
+				rssi += 2;
+			}
 			sc->sc_rxframes++;
 			/*
 			 * Deliver to net80211 without the softc lock held:
@@ -728,19 +811,21 @@ next:
 
 /*
  * Drain the TX-status FIFO (RX_TXSTATUS_FIFO).  The ucode posts one
- * 16-byte struct bcm4313_tx_status per completed frame; ACK/retry
- * accounting can be added here (see brcms_c_dotxstatus()).
+ * 16-byte struct bcm4313_tx_status per completed frame; match it against
+ * the in-flight TX ring by frame id and report ACK/retries to net80211
+ * rate control (the mapping follows brcmsmac brcms_c_dotxstatus()).
  */
 static void
 bcm4313_txstatus_harvest(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 {
-#ifdef BCM4313_DEBUG
+	struct ieee80211_ratectl_tx_status txs;
 	struct bcm4313_tx_status *ts;
-#endif
-	struct bcm4313_slot *slot;
+	struct bcm4313_slot *slot, *tslot;
+	struct bcm4313_ring *tx = &sc->sc_tx;
 	struct mbuf *m;
 	uint32_t hw;
-	int i;
+	uint16_t fid, status;
+	int i, j, n, retries;
 
 	hw = (bcm4313_read_4(sc, ring->r_base + BCM4313_DMA64_STATUS0) &
 	    BCM4313_D64_RS0_CD_MASK) / sizeof(struct bcm4313_dma64desc);
@@ -753,18 +838,74 @@ bcm4313_txstatus_harvest(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 			bus_dmamap_sync(sc->sc_bufdtag, slot->s_dmap,
 			    BUS_DMASYNC_POSTREAD);
 			bus_dmamap_unload(sc->sc_bufdtag, slot->s_dmap);
-			#ifdef BCM4313_DEBUG
-			if (m->m_len >= BCM4313_TXSTATUS_LEN) {
-				ts = mtod(m, struct bcm4313_tx_status *);
-				BCM4313_DPRINTF(sc,
-				    "txstatus: fid %#x status %#x\n",
-				    le16toh(ts->frameid),
-				    le16toh(ts->status));
+			ts = mtod(m, struct bcm4313_tx_status *);
+			fid = le16toh(ts->frameid);
+			status = le16toh(ts->status);
+			if ((status & BCM4313_TX_STATUS_INTERMEDIATE) != 0 &&
+			    (status & BCM4313_TX_STATUS_AMPDU) == 0) {
+				/*
+				 * Partial indication (brcms_c_dotxstatus:
+				 * "INTERMEDIATE but not AMPDU", e.g. after a
+				 * successful RTS exchange); the frame is
+				 * completed by a later status.
+				 */
+				m_freem(m);
+				goto nextslot;
 			}
-			#endif
+			/*
+			 * Find the in-flight frame.  Statuses arrive in FIFO
+			 * order, so the oldest body slot with a matching
+			 * frame id is the one; the scan is bounded in case
+			 * a status lost its frame (already reclaimed).
+			 */
+			tslot = NULL;
+			for (n = 0, j = tx->r_in; n < tx->r_nslots;
+			    n++, j = (j + 1) % tx->r_nslots) {
+				if (tx->r_slots[j].s_type == BCM4313_SLOT_BODY &&
+				    tx->r_slots[j].s_ni != NULL &&
+				    tx->r_slots[j].s_frameid == fid) {
+					tslot = &tx->r_slots[j];
+					break;
+				}
+			}
+			if (tslot != NULL) {
+				memset(&txs, 0, sizeof(txs));
+				if (tslot->s_m != NULL) {
+					txs.pktlen = tslot->s_m->m_pkthdr.len;
+					txs.flags |=
+					    IEEE80211_RATECTL_STATUS_PKTLEN;
+				}
+				if ((status & BCM4313_TX_STATUS_ACK_RCV) != 0)
+					txs.status =
+					    IEEE80211_RATECTL_TX_SUCCESS;
+				else if ((status & BCM4313_TX_STATUS_SUPR_MASK)
+				    == BCM4313_TX_STATUS_SUPR_EXPTIME)
+					txs.status =
+					    IEEE80211_RATECTL_TX_FAIL_EXPIRED;
+				else if ((status & BCM4313_TX_STATUS_SUPR_MASK)
+				    != 0)
+					txs.status =
+					    IEEE80211_RATECTL_TX_FAIL_UNSPECIFIED;
+				else {
+					txs.status =
+					    IEEE80211_RATECTL_TX_FAIL_LONG;
+					retries = (status &
+					    BCM4313_TX_STATUS_FRM_RTX_MASK) >>
+					    BCM4313_TX_STATUS_FRM_RTX_SHIFT;
+					txs.flags |=
+					    IEEE80211_RATECTL_STATUS_LONG_RETRY;
+					txs.long_retries =
+					    (retries > 0) ? retries : 1;
+				}
+				ieee80211_ratectl_tx_complete(tslot->s_ni, &txs);
+				ieee80211_free_node(tslot->s_ni);
+				tslot->s_ni = NULL;
+			} else
+				sc->sc_txnomatch++;
 			m_freem(m);
 			sc->sc_txdone++;
 		}
+nextslot:
 		ring->r_in = (ring->r_in + 1) % ring->r_nslots;
 	}
 	bcm4313_rx_refill(sc, ring);
@@ -798,8 +939,17 @@ bcm4313_plcp_rate(uint8_t rate)	/* rate in 0.5 Mbps units */
 
 /*
  * Build the 112-byte D11 TX DMA header (struct d11txh).  Field semantics
- * follow brcmsmac brcms_c_sendpkt(); the rate encoding should be verified
- * against that function when bring-up begins.
+ * follow brcmsmac brcms_c_sendpkt()/brcms_c_d11hdrs_machdr(); the rate
+ * encodings were verified against brcms_c_compute_plcp() (legacy = PLCP
+ * signal byte / OFDM rate code, HT = MCS index) and frametype() (CCK=0,
+ * OFDM=1, HT=2 in the PhyTxControlWord low bits).
+ *
+ * The node rate is decoded per net80211 conventions: on FreeBSD >= 15
+ * ni_txrate.type says HT vs legacy (ni_txrate.mcs / ni_txrate.dot11rate);
+ * on 14 ni_txrate is the rateset value with IEEE80211_RATE_MCS(0x80) set
+ * for MCS and the basic-rate bit (same bit) in legacy values.  Rate-based
+ * selection (not channel-based) so management frames sent at legacy rates
+ * on an HT channel still get CCK/OFDM framing.
  */
 static void
 bcm4313_set_txhdr(struct bcm4313_softc *sc, struct ieee80211_node *ni,
@@ -807,41 +957,57 @@ bcm4313_set_txhdr(struct bcm4313_softc *sc, struct ieee80211_node *ni,
 {
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct ieee80211_frame *wh;
-	uint8_t rate;
+	uint16_t phyctl;
+	uint8_t mcs, dot11rate;
+	bool is_mcs;
 
 	wh = mtod(m, struct ieee80211_frame *);
 	memset(txh, 0, BCM4313_D11_TXH_LEN);
 	txh->MacTxControlLow = htole16(BCM4313_TXC_STARTMSDU);
+	if ((wh->i_addr1[0] & 1) == 0)
+		txh->MacTxControlLow |= htole16(BCM4313_TXC_IMMEDACK);
 	txh->MacFrameControl = htole16(wh->i_fc[0] | (wh->i_fc[1] << 8));
 	memcpy(txh->TxFrameRA, wh->i_addr1, IEEE80211_ADDR_LEN);
 	txh->TxFrameID = htole16(sc->sc_frameid++);
-	txh->PhyTxControlWord = htole16(BCM4313_PHY_TXC_LCNPHY_ANT_LAST);
-	if (IEEE80211_IS_CHAN_HT(ic->ic_curchan)) {
-		/* HT: 1x1, 20MHz, MCS in MainRates. */
 #if __FreeBSD_version >= 1500000
-		/* ni_txrate is now struct ieee80211_node_txrate. */
-		rate = min(ni->ni_txrate.mcs, 15);
+	is_mcs = (ni->ni_txrate.type == IEEE80211_NODE_TXRATE_HT);
+	mcs = min(ni->ni_txrate.mcs, 15);
+	dot11rate = IEEE80211_RV(ni->ni_txrate.dot11rate);
 #else
-		rate = min(ni->ni_txrate, 15);
+	/* MCS flag and rate share the 0x80 bit (IEEE80211_RATE_VAL = 0x7f). */
+	is_mcs = (ni->ni_txrate & IEEE80211_RATE_MCS) != 0;
+	mcs = min(ni->ni_txrate & IEEE80211_RATE_VAL, 15);
+	dot11rate = ni->ni_txrate & IEEE80211_RATE_VAL;
 #endif
-		txh->MainRates = htole16(rate);
+	/*
+	 * Framing type in the low bits (brcmsmac frametype()): the ucode
+	 * builds the PHY header from it.  The LCN antenna field stays at
+	 * ANT_LAST (0).
+	 */
+	phyctl = BCM4313_PHY_TXC_LCNPHY_ANT_LAST;
+	if (is_mcs) {
+		/* HT: FT_HT, 1x1, 20MHz, MCS index in MainRates. */
+		phyctl |= BCM4313_TXFTYPE_HT;
+		txh->MainRates = htole16(mcs);
 		txh->PhyTxControlWord_1 = htole16(BCM4313_PHY_TXC1_BW_20MHZ |
 		    (BCM4313_PHY_TXC1_MODE_SISO <<
 		    BCM4313_PHY_TXC1_MODE_SHIFT));
 	} else {
 		/* Legacy: PLCP rate code in MainRates. */
-#if __FreeBSD_version >= 1500000
-		/* dot11rate already carries the dot11 rate code. */
-		txh->MainRates = htole16(bcm4313_plcp_rate(
-		    ni->ni_txrate.dot11rate));
-#else
-		rate = ni->ni_txrate;
-		if (rate >= ic->ic_rt->rateCount)
-			rate = 0;
-		txh->MainRates = htole16(bcm4313_plcp_rate(
-		    ic->ic_rt->info[rate].dot11Rate));
-#endif
+		txh->MainRates = htole16(bcm4313_plcp_rate(dot11rate));
+		if (BCM4313_IS_CCK_RATE(dot11rate)) {
+			/*
+			 * Short CCK preamble when both ends support it
+			 * (brcmsmac PHY_TXC_SHORT_HDR); 1Mb/s stays long.
+			 */
+			if (dot11rate != 2 &&
+			    (ni->ni_capinfo & IEEE80211_CAPINFO_SHORT_PREAMBLE) &&
+			    (ic->ic_flags & IEEE80211_F_SHPREAMBLE))
+				phyctl |= BCM4313_PHY_TXC_SHORT_HDR;
+		} else
+			phyctl |= BCM4313_TXFTYPE_OFDM;
 	}
+	txh->PhyTxControlWord = htole16(phyctl);
 }
 
 /*
@@ -883,6 +1049,8 @@ bcm4313_tx_start_locked(struct bcm4313_softc *sc, struct ieee80211_node *ni,
 	bus_dmamap_sync(sc->sc_bufdtag, ring->r_txhdr_dmap,
 	    BUS_DMASYNC_PREWRITE);
 	hpa = ring->r_txhdr_pa + fi * BCM4313_D11_TXH_LEN;
+	/* The ucode echoes TxFrameID back in the TX status; keep it. */
+	ring->r_slots[slotB].s_frameid = le16toh(txh->TxFrameID);
 
 	/* Map the frame body. */
 	error = bus_dmamap_load_mbuf_sg(sc->sc_bufdtag,
@@ -1467,14 +1635,21 @@ static void
 bcm4313_update_promisc(struct ieee80211com *ic)
 {
 	struct bcm4313_softc *sc = ic->ic_softc;
+	uint32_t bits;
 
 	BCM4313_LOCK(sc);
+	/*
+	 * MCTL_KEEPCONTROL alongside promisc so monitor mode captures
+	 * control frames (brcms_c_mac_promisc: FIF_CONTROL ->
+	 * MCTL_KEEPCONTROL).  MCTL_KEEPBADFCS stays clear -- bad-FCS frames
+	 * are dropped in the RX path either way.
+	 */
 	if (ic->ic_promisc > 0)
-		bcm4313_maskset_4(sc, BCM4313_D11_MACCONTROL, ~0,
-		    BCM4313_MCTL_PROMISC);
+		bits = BCM4313_MCTL_PROMISC | BCM4313_MCTL_KEEPCONTROL;
 	else
-		bcm4313_maskset_4(sc, BCM4313_D11_MACCONTROL,
-		    ~BCM4313_MCTL_PROMISC, 0);
+		bits = 0;
+	bcm4313_maskset_4(sc, BCM4313_D11_MACCONTROL,
+	    ~(BCM4313_MCTL_PROMISC | BCM4313_MCTL_KEEPCONTROL), bits);
 	BCM4313_UNLOCK(sc);
 }
 
@@ -2197,6 +2372,18 @@ bcm4313_sysctl_setup(struct bcm4313_softc *sc)
 	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
 	    "rxgiants", CTLFLAG_RD, &sc->sc_rxgiants, 0,
 	    "Oversized RX frames dropped");
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "rxpad", CTLFLAG_RD, &sc->sc_rxpad, 0,
+	    "RX frames with QoS pad bytes stripped");
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "rxamsdu", CTLFLAG_RD, &sc->sc_rxamsdu, 0,
+	    "A-MSDU frames dropped (unsupported)");
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "rssiinvalid", CTLFLAG_RD, &sc->sc_rssiinvalid, 0,
+	    "RX frames without a valid PHY status (RSSI unknown)");
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "txnomatch", CTLFLAG_RD, &sc->sc_txnomatch, 0,
+	    "TX statuses with no matching in-flight frame");
 	SYSCTL_ADD_PROC(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
 	    "dmaerr", CTLTYPE_STRING | CTLFLAG_RD, sc, 0,
 	    bcm4313_sysctl_dmaerr, "A",

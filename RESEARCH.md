@@ -161,6 +161,79 @@ nothing from this driver beyond what exists:
     auto-bring the interface back; on FreeBSD the user re-ups, matching the
     PSM-watchdog recovery contract).
 
+## RX/TX data-path audit (2026-11: buffer layout, RSSI, TX framing, rate control)
+
+Second pass over the whole RX/TX path against the bundled reference, this
+time frame-layout-level (brcms_c_recv / brcms_c_recvctl / dma.c /
+brcms_c_dotxstatus / wlc_phy_rssi_compute).  Findings, all fixed in this
+round:
+
+- **RX buffer layout was wrong** (likely the "attaches but deaf" class).
+  The port assumed `[24B rxhdr][802.11 frame]` with `RxFrameSize` = frame
+  length.  Upstream D11 rev >= 16 actually delivers
+  `[38B header region][6B PLCP][802.11][4B FCS]`, with `RxFrameSize`
+  counting PLCP + frame + FCS (+2 pad bytes after the header region when
+  `RXS_PBPRES` — which the MAC sets for QoS/A-MSDU/4-address frames, i.e.
+  every WME data frame).  The RX DMA64 control register must also program
+  the offset (`RC_RO` bits) so the hardware places frame data at 38 — the
+  port defined `RC_RO_MASK` but never wrote it, so frame data landed on
+  top of the rx header.  Fixed: `RC_RO = 38` in `ring_rx_init`, and the
+  harvest strips header region / pad / PLCP / FCS exactly like
+  `brcms_c_recv`+`brcms_c_recvctl` (plus the A-MSDU toss).  RX buffers
+  grew to 4096 (page-size jumbo mbufs) because 38 + 6 + 2346 + 4 > 2048.
+- **RX RSSI was the NPHY formula on an LCN PHY.**  The port negated the
+  HTPHY RxPower field in PhyRxStatus_2; upstream LCN reads JSSI from
+  PhyRxStatus_1 (signed), adds the gain-index correction table
+  (`lcnphy_gain_index_offset_for_pkt_rssi`, 38 entries, ported
+  byte-for-byte), +7 for rssi > -46 with gidx > 18, +2 slope constant,
+  and reports invalid when `RxStatus2 & RXS_PHYRXST_VALID` is clear.
+  Wrong RSSI corrupted scan sorting and any RSSI-based logic.
+- **TX header had no framing type.**  Upstream ORs CCK(0)/OFDM(1)/HT(2)
+  (`frametype()`; `mimoft = FT_HT`) into the PhyTxControlWord low bits;
+  the port left 0 for everything, so every OFDM/MCS data frame was
+  announced to the ucode as CCK.  Also added `TXC_IMMEDACK` for unicast
+  (without it the ucode does not expect/await ACKs) and the short-CCK-
+  preamble bit when both ends support it (`PHY_TXC_SHORT_HDR`, 1 Mb/s
+  stays long).
+- **Legacy rate encoding had the basic-rate bug.**  net80211's
+  `dot11Rate` carries the 0x80 basic-rate bit (`B(r)` in
+  ieee80211_phy.c); the old `bcm4313_plcp_rate(info[rate].dot11Rate)`
+  fell through its switch to 6 Mb/s for every basic rate.  Fixed with
+  `IEEE80211_RV()` masking.  Verified the legacy/MCS values themselves:
+  MainRates = PLCP signal byte for CCK/OFDM, MCS index for HT — the
+  port's tables were correct.
+- **`ni_txrate` was decoded wrong on both branches.**  FreeBSD 14: it is
+  the rateset value with `IEEE80211_RATE_MCS` (0x80) set for MCS — the
+  old `min(ni_txrate, 15)` collapsed every MCS rate to MCS15.  FreeBSD
+  15+: `ni_txrate.type` says HT vs legacy.  Now decoded per branch and
+  selected rate-based (not channel-based) so management frames at legacy
+  rates on an HT channel keep CCK/OFDM framing.
+- **Rate control had no feedback.**  The port drained TX statuses for
+  counters only.  Now each status is matched against the in-flight TX
+  ring by TxFrameID (stored per body slot) and mapped to
+  `ieee80211_ratectl_tx_complete()`: ACK_RCV → SUCCESS, retries
+  (`TX_STATUS_FRM_RTX`) → TX_FAIL_LONG + long_retries, SUPR_EXPTIME →
+  EXPIRED, other suppress → UNSPECIFIED, INTERMEDIATE-without-AMPDU →
+  skipped (not a completion).  Without this, amt/amrr/minstrel could
+  never adapt.  New counters: `txnomatch`, `rxpad`, `rxamsdu`,
+  `rssiinvalid` under `dev.bcm4313.0`.
+- Non-issues verified: RCM MAC/BSSID writes already match
+  `brcms_b_set_addrmatch` (data-only, no mask register writes), and the
+  TX header cache geometry (32 frames × 112 B in one mapping) is fine.
+
+**What hardware will confirm** (on top of the existing list):
+1. Scan actually finds networks now (RX layout) — `rxpad` > 0 on an
+   802.11n WME AP is the direct evidence the pad strip works.
+2. `ifconfig wlan0 list scan` signal levels are plausible (RSSI formula);
+   `rssiinvalid` should stay ~0.
+3. Association completes and throughput works (TX framing + IMMEDACK);
+   rate control adapts under load (watch MCS change with
+   `wlandebug -i wlan0 rate` or the ratectl counters).
+4. If RX still parses wrong with RC_RO = 38, dump a received buffer with
+   the debug printf and compare against the layout above — 38 is
+   upstream's constant for all D11 revs it supports, but the first real
+   buffer dump should confirm it.
+
 ## More brcmsmac behavior worth porting (audit)
 
 Re-checked against the bundled tree after the MI_RFDISABLE and DMA-FIFO

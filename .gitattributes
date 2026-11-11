@@ -1,0 +1,13 @@
+# FreeBSD kernel-driver repo: LF line endings everywhere, no exceptions.
+# This Windows checkout previously had core.autocrlf=true, which wrote CRLF
+# into the working tree; FreeBSD /bin/sh and bmake reject CRLF files
+# ("invalid option", "missing separator").  eol=lf overrides autocrlf for
+# every clone of this repo, on every OS.
+* text=auto eol=lf
+
+# Belt and braces: never let git normalize firmware blobs or binaries.
+*.fw binary
+*.png binary
+*.jpg binary
+*.gif binary
+*.ko binary

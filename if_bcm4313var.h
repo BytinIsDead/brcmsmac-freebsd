@@ -416,8 +416,18 @@ struct bcm4313_d11txh {
 /*
  * ---------------------------------------------------------------------------
  * D11 RX DMA header (struct d11rxhdr) -- 24 bytes at the start of every
- * received buffer, followed by the 802.11 frame (FCS already stripped when
- * MCTL_KEEPBADFCS is clear).  Layout verified against brcmsmac d11.h.
+ * received buffer.  The full buffer layout on D11 rev >= 16 (brcmsmac
+ * BRCMS_HWRXOFF / brcms_c_recv / brcms_c_recvctl) is:
+ *
+ *	[0,  BCM4313_HWRXOFF)		d11rxhdr (24) + reserved region
+ *	[+2 pad bytes if RXS_PBPRES]	MAC inserts these for QoS/A-MSDU/a4
+ *	[+6]				PLCP header (D11_PHY_HDR_LEN)
+ *	[..]				802.11 frame (MAC header + body)
+ *	[+4]				FCS
+ *
+ * RxFrameSize counts everything after BCM4313_HWRXOFF (pad + PLCP + frame +
+ * FCS).  The RX DMA64 control register must program the same offset in its
+ * RC_RO field so the hardware places frame data at BCM4313_HWRXOFF.
  * ---------------------------------------------------------------------------
  */
 struct bcm4313_d11rxhdr {
@@ -435,6 +445,10 @@ struct bcm4313_d11rxhdr {
 	uint16_t	RxChan;
 } __packed;
 #define	BCM4313_D11_RXH_LEN		(sizeof(struct bcm4313_d11rxhdr)) /* 24 */
+#define	BCM4313_HWRXOFF			38	/* hdr region the DMA reserves
+						   (brcmsmac BRCMS_HWRXOFF) */
+#define	BCM4313_D11_PHY_HDR_LEN		6	/* PLCP header */
+#define	BCM4313_FCS_LEN			4
 
 /* RxStatus1 (RXS_*). */
 #define	BCM4313_RXS_BCNSENT		0x8000
@@ -444,8 +458,15 @@ struct bcm4313_d11rxhdr {
 #define	BCM4313_RXS_RESPFRAMETX		(1 << 1)
 #define	BCM4313_RXS_FCSERR		(1 << 0)
 
-/* PhyRxStatus_2 (HTPHY/LCN). */
-#define	BCM4313_PRXS2_HTPHY_RXPWR_ANT0	0xFF00
+/* RxStatus2 (extended MAC rx status). */
+#define	BCM4313_RXS_AMSDU		0x0001	/* A-MSDU subframe */
+#define	BCM4313_RXS_PHYRXST_VALID	(1 << 8) /* PHY rx status valid */
+
+/* PhyRxStatus_1 (LCN): JSSI -- signed 8-bit received signal strength. */
+#define	BCM4313_PRXS1_JSSI_MASK		0x00FF
+/* PhyRxStatus_2 (LCN): RX gain index the packet was received with. */
+#define	BCM4313_PRXS2_GIDX_MASK		0xFC00
+#define	BCM4313_PRXS2_GIDX_SHIFT	10
 
 /* TX status packet (16 bytes, delivered via RX_TXSTATUS_FIFO). */
 struct bcm4313_tx_status {
@@ -459,6 +480,32 @@ struct bcm4313_tx_status {
 	uint16_t	ackphyrxsh;
 } __packed;
 #define	BCM4313_TXSTATUS_LEN		16
+
+/* tx status->status bits (d11.h TX_STATUS_*). */
+#define	BCM4313_TX_STATUS_FRM_RTX_MASK	0xF000	/* frame retry count */
+#define	BCM4313_TX_STATUS_FRM_RTX_SHIFT	12
+#define	BCM4313_TX_STATUS_INTERMEDIATE	(1 << 6) /* not a completion */
+#define	BCM4313_TX_STATUS_AMPDU		(1 << 5) /* AMPDU status */
+#define	BCM4313_TX_STATUS_SUPR_MASK	0x1C	/* suppress reason */
+#define	BCM4313_TX_STATUS_SUPR_EXPTIME	(5 << 2) /* lifetime expired */
+#define	BCM4313_TX_STATUS_ACK_RCV	(1 << 1) /* ACK received */
+
+/* PhyTxControlWord framing type (d11.h FT_*; brcmsmac frametype()). */
+#define	BCM4313_TXFTYPE_CCK		0
+#define	BCM4313_TXFTYPE_OFDM		1
+#define	BCM4313_TXFTYPE_HT		2
+
+/* MAC control filtering bits (d11.h MCTL_KEEP*; brcms_c_mac_promisc). */
+#define	BCM4313_MCTL_KEEPCONTROL	(1 << 22)
+#define	BCM4313_MCTL_KEEPBADFCS		(1 << 23)
+
+/*
+ * CCK dot11 rates in 0.5 Mb/s units.  net80211 has no rate-modulation test
+ * macro (there is no IEEE80211_IS_CCK_RATE), so classify locally, like
+ * brcmsmac's is_cck_rate().
+ */
+#define	BCM4313_IS_CCK_RATE(_r)	\
+    ((_r) == 2 || (_r) == 4 || (_r) == 11 || (_r) == 22)
 
 /*
  * ---------------------------------------------------------------------------
@@ -747,6 +794,7 @@ struct bcm4313_slot {
 	bus_dmamap_t		s_dmap;		/* map of s_m (or txhdr) */
 	struct mbuf		*s_m;		/* rx mbuf / tx mbuf */
 	struct ieee80211_node	*s_ni;		/* tx node (tx rings) */
+	uint16_t		s_frameid;	/* d11 TxFrameID (tx body slots) */
 	uint8_t			s_type;		/* slot type (tx rings) */
 #define	BCM4313_SLOT_HEADER	0
 #define	BCM4313_SLOT_BODY	1
@@ -896,6 +944,10 @@ struct bcm4313_softc {
 	uint32_t		sc_txframes;	/* frames posted to the DMA TX ring */
 	uint32_t		sc_rxframes;	/* frames delivered to net80211 */
 	uint32_t		sc_txdone;	/* tx statuses harvested */
+	uint32_t		sc_txnomatch;	/* statuses with no in-flight match */
+	uint32_t		sc_rxpad;	/* frames with QoS pad bytes stripped */
+	uint32_t		sc_rxamsdu;	/* A-MSDU frames dropped */
+	uint32_t		sc_rssiinvalid;	/* frames without a valid PHY rx status */
 	uint32_t		sc_wdog_fires;	/* watchdog resets + PSM watchdog events */
 	uint32_t		sc_dmaerr[8];	/* per-FIFO DMA error counts */
 	uint8_t			sc_dmaerr_fifo;	/* FIFO of the last DMA error */
