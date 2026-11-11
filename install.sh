@@ -127,7 +127,11 @@ for c in /boot/modules/if_bcm4313.ko /boot/kernel/if_bcm4313.ko "$HERE/if_bcm431
 done
 [ -n "$KO" ] || fb_die "no if_bcm4313.ko found (looked in /boot/modules, /boot/kernel, $HERE)."
 fb_note "kldload $KO"
-kldload if_bcm4313 || fb_die "kldload failed. Diagnose with: dmesg | tail -30"
+# Load the exact file verified above.  A bare "kldload if_bcm4313" only
+# searches the kernel module path and fails when make install has not put
+# the module there yet, even though the tree's own .ko exists.
+kldload "$KO" || kldload if_bcm4313 || \
+    fb_die "kldload failed. Diagnose with: dmesg | tail -30"
 sleep 1
 
 # --- redundant: confirm the module is really loaded ---------------------------
