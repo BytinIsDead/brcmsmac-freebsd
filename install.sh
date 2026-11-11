@@ -161,7 +161,11 @@ while [ "$attempt" -lt 2 ]; do
 done
 [ -n "$WLDEV" ] || {
     echo "ERROR: no bcm4313* device in: $(sysctl -n net.wlan.devices 2>/dev/null)" >&2
-    echo "       Attach failed after 2 attempts; check: dmesg | tail -20   (or: sh diag.sh)" >&2
+    echo "       Attach failed after 2 attempts; driver dmesg tail:" >&2
+    dmesg 2>/dev/null | grep -iE 'bcm4313|bhnd' | tail -30 | sed 's/^/         /' >&2
+    echo "       NOTE: a chip wedge left by a crashed earlier session survives" >&2
+    echo "       kldunload; if the tail shows 'core reset failed', REBOOT once" >&2
+    echo "       and rerun this tool on the fresh boot." >&2
     exit 1
 }
 echo "==> using wireless device: $WLDEV"
