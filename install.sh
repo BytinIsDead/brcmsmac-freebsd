@@ -93,7 +93,7 @@ if kldstat -q -m if_bcm4313; then
     PCISEL="$(fb_pci_selector)"
     fb_destroy_wlans_over 'bcm4313*'
     fb_note "unloading old if_bcm4313"
-    kldunload if_bcm4313 || {
+    kldunload if_bcm4313 || kldunload if_bcm4313.ko || {
         echo "ERROR: could not unload if_bcm4313." >&2
         echo "       Destroy remaining wlan interfaces over it:" >&2
         echo "         for i in \$(ifconfig -g wlan); do ifconfig \$i destroy; done" >&2
@@ -104,7 +104,7 @@ if kldstat -q -m if_bcm4313; then
     if kldstat -q -m if_bcm4313; then
         fb_warn "if_bcm4313 still listed after unload; retrying once..."
         sleep 2
-        kldunload if_bcm4313 2>/dev/null || {
+        kldunload if_bcm4313 2>/dev/null || kldunload if_bcm4313.ko 2>/dev/null || {
             echo "ERROR: module is still pinned. What holds it?" >&2
             echo "       kldstat -m if_bcm4313 ; ifconfig -g wlan" >&2
             exit 1
@@ -126,6 +126,12 @@ for c in /boot/modules/if_bcm4313.ko /boot/kernel/if_bcm4313.ko "$HERE/if_bcm431
     [ -f "$c" ] && KO="$c" && break
 done
 [ -n "$KO" ] || fb_die "no if_bcm4313.ko found (looked in /boot/modules, /boot/kernel, $HERE)."
+if fb_kld_stuck; then
+    echo "ERROR: if_bcm4313.ko is resident without a registered driver module" >&2
+    echo "       (left over from a failed unload).  kldload will refuse it:" >&2
+    echo "       REBOOT and rerun this tool." >&2
+    exit 1
+fi
 fb_note "kldload $KO"
 # Load the exact file verified above.  A bare "kldload if_bcm4313" only
 # searches the kernel module path and fails when make install has not put

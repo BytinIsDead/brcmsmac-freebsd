@@ -75,6 +75,14 @@ fb_find_ko() {
 fb_ensure_driver() {
     local i ko
     kldstat -q -m if_bcm4313 && return 0
+    if fb_kld_stuck; then
+        echo "ERROR: if_bcm4313.ko is resident but the driver module is not" >&2
+        echo "       registered -- a previous kldunload detached the devices" >&2
+        echo "       without releasing the file, and kldload will refuse it" >&2
+        echo "       forever ('module already loaded or in kernel')." >&2
+        echo "       REBOOT, then rerun this tool." >&2
+        exit 1
+    fi
     ko="$(fb_find_ko 2>/dev/null)" || ko=""
     if [ -n "$ko" ]; then
         fb_warn "if_bcm4313 is not loaded -- loading $ko"
@@ -104,6 +112,14 @@ fb_require_tree() {
     HERE="$(cd "$(dirname "$0")" && pwd)"
     [ -f "$HERE/if_bcm4313.c" ] ||
         fb_die "run $0 from the driver directory (could not find if_bcm4313.c next to $0)"
+}
+
+# fb_kld_stuck: the if_bcm4313.ko FILE is loaded but the driver MODULE is not
+# registered -- a failed kldunload after a wedge detaches the devices yet
+# leaves the linker file resident, and kldload then refuses with "module
+# already loaded or in kernel" forever.  Only a reboot clears this state.
+fb_kld_stuck() {
+    kldstat 2>/dev/null | awk 'NR>1{print $NF}' | grep -q 'if_bcm4313'
 }
 
 # --- device helpers -------------------------------------------------------------
