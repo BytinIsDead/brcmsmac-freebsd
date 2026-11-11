@@ -848,6 +848,22 @@ next:
 }
 
 /*
+ * The core answers every read with 0xffffffff once it is wedged past the
+ * bus (clock-gated out of reset reach, dead card).  Masked against the
+ * interrupt mask that value still looks like "every interrupt", and each
+ * handler then services those phantom bits, trips the fifo poll, and
+ * orders the very core reset that can never handshake -- the
+ * "DMA fifo N: ...; DMA engine error; resetting MAC; BCMA_DMP_RESETSTATUS
+ * timeout; core reset failed: 60" dmesg flood.  Mirror brcmsmac's
+ * wlc_intstatus(): treat an all-ones register read as "no interrupt".
+ */
+static __inline int
+bcm4313_intstatus_valid(uint32_t is)
+{
+	return (is != 0xffffffff);
+}
+
+/*
  * Drain completed TX statuses from the frmtxstatus/frmtxstatus2 register
  * pair (brcmsmac brcms_b_txstatus: no DMA ring is used for TX statuses --
  * the ucode posts them through these registers).  Each valid status is
@@ -878,7 +894,10 @@ bcm4313_txstatus_drain(struct bcm4313_softc *sc)
 		}
 		if ((s1 & BCM4313_TXS_V) == 0)
 			break;			/* no more statuses */
+		/* The second-word read pops the queued status; its sequence
+		 * and PHY-error fields carry nothing we act on. */
 		s2 = bcm4313_read_4(sc, BCM4313_D11_FRMTXSTATUS2);
+		(void)s2;
 		status = s1 & BCM4313_TXS_STATUS_MASK;
 		fid = (s1 & BCM4313_TXS_FID_MASK) >> BCM4313_TXS_FID_SHIFT;
 		if ((status & BCM4313_TX_STATUS_INTERMEDIATE) != 0 &&
@@ -1813,20 +1832,10 @@ bcm4313_vap_delete(struct ieee80211vap *vap)
  */
 /*
  * The core answers every read with 0xffffffff once it is wedged past the
- * bus (clock-gated out of reset reach, dead card).  Masked against the
- * interrupt mask that value still looks like "every interrupt", and each
- * handler then services those phantom bits, trips the fifo poll, and
- * orders the very core reset that can never handshake -- the
- * "DMA fifo N: ...; DMA engine error; resetting MAC; BCMA_DMP_RESETSTATUS
- * timeout; core reset failed: 60" dmesg flood.  Mirror brcmsmac's
- * wlc_intstatus(): treat an all-ones macintstatus as "no interrupt".
+ * bus (clock-gated out of reset reach, dead card).  Mirror brcmsmac's
+ * wlc_intstatus(): treat an all-ones read as "no interrupt" (the helper
+ * lives near the top of this file, before its first user).
  */
-static __inline int
-bcm4313_intstatus_valid(uint32_t is)
-{
-	return (is != 0xffffffff);
-}
-
 static int
 bcm4313_intr(void *arg)
 {
