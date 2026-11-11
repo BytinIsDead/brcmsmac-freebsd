@@ -234,6 +234,37 @@ round:
    upstream's constant for all D11 revs it supports, but the first real
    buffer dump should confirm it.
 
+## Hardware bring-up round 2: DMA wedge at first `up` (2026-11-11)
+
+Hardware evidence (dmesg, FreeBSD 15.1, HP laptop / 8GB RAM): the attach is
+clean (front-end, bhnd chain, ucode upload 10072 words, 42 channels, wlan0
+created with its MAC), then exactly one line after the interface is brought
+up: `DMA core not responding (intstatus 0xffffffff); MAC stopped, re-up to
+recover` -- the dead-core latch firing at the first 1 Hz watchdog tick.
+
+Root causes found by auditing the port against upstream `dma.c`/`main.c`:
+
+1. **The TX-status DMA ring was invented, not ported.** Upstream brcmsmac
+   attaches NO RX engine for TX statuses (its fifo-3 attach is TX-only) and
+   reads statuses from the `frmtxstatus`/`frmtxstatus2` register pair
+   (`brcms_b_txstatus`, d11.h 0x170/0x174, TXS_V-gated loop).  The port had
+   built a 16-byte RX DMA ring on RX_TXSTATUS_FIFO(3) -- an enabled RX
+   engine on a fifo the ucode never feeds.  Removed; the drain now reads
+   the registers and maps each status to the in-flight TX frame by frame id
+   for rate-control feedback (same ACK/retry/suppress mapping as before).
+2. **Ring init enabled the engine before programming the descriptor-table
+   address.**  Upstream's dma.c comment says the table must be inited before
+   enabling (for non-aligndesc_4k cores; the 4K/8K-alignment cores program
+   the table AFTER the enable -- decided at runtime by writing 0xff0 to
+   ADDRLow and reading it back, `_dma_descriptor_align`).  The port did
+   enable-then-table unconditionally.  Now ported exactly: per-engine
+   alignment probe, then table/enable ordering per upstream.
+3. The fifo error poll no longer includes fifo 3 (no RX engine there).
+
+If the wedge recurs, the improved diagnostic prints macintstatus/maccontrol
+alongside the all-ones intstatus, which distinguishes a clock-gated core
+from a bus-stuck controller.
+
 ## More brcmsmac behavior worth porting (audit)
 
 Re-checked against the bundled tree after the MI_RFDISABLE and DMA-FIFO

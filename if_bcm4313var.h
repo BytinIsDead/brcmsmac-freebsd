@@ -468,18 +468,21 @@ struct bcm4313_d11rxhdr {
 #define	BCM4313_PRXS2_GIDX_MASK		0xFC00
 #define	BCM4313_PRXS2_GIDX_SHIFT	10
 
-/* TX status packet (16 bytes, delivered via RX_TXSTATUS_FIFO). */
-struct bcm4313_tx_status {
-	uint16_t	framelen;
-	uint16_t	PAD;
-	uint16_t	frameid;
-	uint16_t	status;
-	uint16_t	lasttxtime;
-	uint16_t	sequence;
-	uint16_t	phyerr;
-	uint16_t	ackphyrxsh;
-} __packed;
-#define	BCM4313_TXSTATUS_LEN		16
+/*
+ * TX status comes from the frmtxstatus/frmtxstatus2 register pair (d11.h
+ * 0x170/0x174; brcmsmac brcms_b_txstatus reads them in a loop) -- there is
+ * NO DMA ring for TX statuses; the RX_TXSTATUS_FIFO(3) engine is TX-only in
+ * upstream and the ucode posts statuses through these registers.
+ */
+#define	BCM4313_D11_FRMTXSTATUS		0x170
+#define	BCM4313_D11_FRMTXSTATUS2	0x174
+#define	BCM4313_TXS_V			(1u << 0)	/* valid */
+#define	BCM4313_TXS_STATUS_MASK		0xffff
+#define	BCM4313_TXS_FID_MASK		0xffff0000
+#define	BCM4313_TXS_FID_SHIFT		16
+#define	BCM4313_TXS_SEQ_MASK		0xffff		/* frmtxstatus2 */
+#define	BCM4313_TXS_PTX_MASK		0xff0000
+#define	BCM4313_TXS_PTX_SHIFT		16
 
 /* tx status->status bits (d11.h TX_STATUS_*). */
 #define	BCM4313_TX_STATUS_FRM_RTX_MASK	0xF000	/* frame retry count */
@@ -901,7 +904,6 @@ struct bcm4313_softc {
 	struct bhnd_dma_translation sc_dma_translation;
 	struct bcm4313_ring	sc_tx;		/* FIFO 1: data */
 	struct bcm4313_ring	sc_rx;		/* FIFO 0: receive */
-	struct bcm4313_ring	sc_txstatus;	/* FIFO 3: tx status */
 
 	/* PHY / radio */
 	uint8_t			sc_phy_type;

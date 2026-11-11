@@ -110,7 +110,8 @@ static int	bcm4313_ucode_download(struct bcm4313_softc *);
 /* Ring sizes. */
 #define	BCM4313_NTX_DESC		64	/* 32 frames, 2 slots each */
 #define	BCM4313_NRX_DESC		64
-#define	BCM4313_NTXSTATUS_DESC		16
+/* Max TX statuses drained per pass (upstream TXSBND). */
+#define	BCM4313_TXS_MAX			8
 /*
  * RX buffer: must hold the 38-byte DMA header region plus a full-size MPDU
  * with PLCP and FCS (brcmsmac RXBUFSZ; 2048 would cut 2346-byte frames).
@@ -456,24 +457,50 @@ bcm4313_ring_free(struct bcm4313_ring *ring)
 	memset(ring, 0, sizeof(*ring));
 }
 
+/*
+ * Descriptor-alignment probe (brcmsmac _dma_descriptor_align): write 0xff0
+ * to ADDRLow and read it back.  If the core keeps the value, the descriptor
+ * table can sit anywhere and must be programmed BEFORE the engine is
+ * enabled; if the low bits read back as zero, the core requires the
+ * 4K/8K-aligned table and the address is written AFTER the enable bit.
+ * (Upstream's own dma.c comment: "DMA engine with out alignment requirement
+ * requires table to be inited before enabling the engine".)
+ */
+static bool
+bcm4313_ring_align_probe(struct bcm4313_softc *sc, uint16_t base)
+{
+	bcm4313_write_4(sc, base + BCM4313_DMA64_ADDRLOW, 0xff0);
+	return (bcm4313_read_4(sc, base + BCM4313_DMA64_ADDRLOW) == 0);
+}
+
 /* Initialize a TX dma64 channel. */
 static int
 bcm4313_ring_tx_init(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 {
 	bus_addr_t pa;
+	bool align4k;
 
 	ring->r_in = ring->r_out = 0;
 	memset(ring->r_desc, 0, ring->r_nslots *
 	    sizeof(struct bcm4313_dma64desc));
+	pa = bcm4313_dma_addr(sc, ring->r_paddr);
+	align4k = bcm4313_ring_align_probe(sc, ring->r_base);
+	/* Descriptor table base (8KB-aligned ring), upstream dma_txinit. */
+	if (!align4k) {
+		bcm4313_write_4(sc, ring->r_base + BCM4313_DMA64_ADDRLOW,
+		    (uint32_t)pa);
+		bcm4313_write_4(sc, ring->r_base + BCM4313_DMA64_ADDRHIGH,
+		    (uint32_t)((uint64_t)pa >> 32));
+	}
 	/* Enable the channel (parity disabled; not implemented). */
 	bcm4313_write_4(sc, ring->r_base + BCM4313_DMA64_CTL,
 	    BCM4313_D64_XC_XE | BCM4313_D64_XC_PD);
-	/* Descriptor table base (8KB-aligned ring). */
-	pa = bcm4313_dma_addr(sc, ring->r_paddr);
-	bcm4313_write_4(sc, ring->r_base + BCM4313_DMA64_ADDRLOW,
-	    (uint32_t)pa);
-	bcm4313_write_4(sc, ring->r_base + BCM4313_DMA64_ADDRHIGH,
-	    (uint32_t)((uint64_t)pa >> 32));
+	if (align4k) {
+		bcm4313_write_4(sc, ring->r_base + BCM4313_DMA64_ADDRLOW,
+		    (uint32_t)pa);
+		bcm4313_write_4(sc, ring->r_base + BCM4313_DMA64_ADDRHIGH,
+		    (uint32_t)((uint64_t)pa >> 32));
+	}
 	bcm4313_write_4(sc, ring->r_base + BCM4313_DMA64_PTR, 0);
 	return (0);
 }
@@ -483,10 +510,19 @@ static int
 bcm4313_ring_rx_init(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 {
 	bus_addr_t pa;
+	bool align4k;
 
 	ring->r_in = ring->r_out = 0;
 	memset(ring->r_desc, 0, ring->r_nslots *
 	    sizeof(struct bcm4313_dma64desc));
+	pa = bcm4313_dma_addr(sc, ring->r_paddr);
+	align4k = bcm4313_ring_align_probe(sc, ring->r_base);
+	if (!align4k) {
+		bcm4313_write_4(sc, ring->r_base + BCM4313_DMA64_ADDRLOW,
+		    (uint32_t)pa);
+		bcm4313_write_4(sc, ring->r_base + BCM4313_DMA64_ADDRHIGH,
+		    (uint32_t)((uint64_t)pa >> 32));
+	}
 	/*
 	 * Enable RX and program the frame offset: the MAC writes the d11
 	 * rx header at offset 0 and frame data (PLCP + 802.11 + FCS) at
@@ -498,11 +534,12 @@ bcm4313_ring_rx_init(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 	bcm4313_write_4(sc, ring->r_base + BCM4313_DMA64_CTL,
 	    ((BCM4313_HWRXOFF << BCM4313_D64_RC_RO_SHIFT) &
 	    BCM4313_D64_RC_RO_MASK) | BCM4313_D64_RC_RE | BCM4313_D64_RC_PD);
-	pa = bcm4313_dma_addr(sc, ring->r_paddr);
-	bcm4313_write_4(sc, ring->r_base + BCM4313_DMA64_ADDRLOW,
-	    (uint32_t)pa);
-	bcm4313_write_4(sc, ring->r_base + BCM4313_DMA64_ADDRHIGH,
-	    (uint32_t)((uint64_t)pa >> 32));
+	if (align4k) {
+		bcm4313_write_4(sc, ring->r_base + BCM4313_DMA64_ADDRLOW,
+		    (uint32_t)pa);
+		bcm4313_write_4(sc, ring->r_base + BCM4313_DMA64_ADDRHIGH,
+		    (uint32_t)((uint64_t)pa >> 32));
+	}
 	bcm4313_write_4(sc, ring->r_base + BCM4313_DMA64_PTR, 0);
 	bcm4313_rx_refill(sc, ring);
 	return (0);
@@ -593,10 +630,11 @@ bcm4313_rx_refill(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 	for (i = 0; i < n; i++) {
 		slot = &ring->r_slots[ring->r_out];
 		/*
-		 * 2KB clusters for the small TX-status ring; page-size jumbo
-		 * clusters for the data RX ring (BCM4313_RXBUFSZ = 4096 does
-		 * not fit MCLBYTES).  Requires a 4K-page architecture, which
-		 * every bhnd PCIe host is.
+		 * Page-size jumbo clusters for the data RX ring
+		 * (BCM4313_RXBUFSZ = 4096 does not fit MCLBYTES); the
+		 * conditional remains for any future small-buffer ring.
+		 * Requires a 4K-page architecture, which every bhnd PCIe
+		 * host is.
 		 */
 		if (ring->r_bufsz <= MCLBYTES)
 			m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
@@ -810,105 +848,94 @@ next:
 }
 
 /*
- * Drain the TX-status FIFO (RX_TXSTATUS_FIFO).  The ucode posts one
- * 16-byte struct bcm4313_tx_status per completed frame; match it against
- * the in-flight TX ring by frame id and report ACK/retries to net80211
- * rate control (the mapping follows brcmsmac brcms_c_dotxstatus()).
+ * Drain completed TX statuses from the frmtxstatus/frmtxstatus2 register
+ * pair (brcmsmac brcms_b_txstatus: no DMA ring is used for TX statuses --
+ * the ucode posts them through these registers).  Each valid status is
+ * matched against the in-flight TX ring by frame id and reported to
+ * net80211 rate control (the mapping follows brcms_c_dotxstatus()).
  */
 static void
-bcm4313_txstatus_harvest(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
+bcm4313_txstatus_drain(struct bcm4313_softc *sc)
 {
 	struct ieee80211_ratectl_tx_status txs;
-	struct bcm4313_tx_status *ts;
-	struct bcm4313_slot *slot, *tslot;
+	struct bcm4313_slot *tslot;
 	struct bcm4313_ring *tx = &sc->sc_tx;
-	struct mbuf *m;
-	uint32_t hw;
+	uint32_t s1, s2;
 	uint16_t fid, status;
-	int i, j, n, retries;
+	int j, n, retries;
 
-	hw = (bcm4313_read_4(sc, ring->r_base + BCM4313_DMA64_STATUS0) &
-	    BCM4313_D64_RS0_CD_MASK) / sizeof(struct bcm4313_dma64desc);
-	while (ring->r_in != (int)hw) {
-		i = ring->r_in;
-		slot = &ring->r_slots[i];
-		m = slot->s_m;
-		slot->s_m = NULL;
-		if (m != NULL) {
-			bus_dmamap_sync(sc->sc_bufdtag, slot->s_dmap,
-			    BUS_DMASYNC_POSTREAD);
-			bus_dmamap_unload(sc->sc_bufdtag, slot->s_dmap);
-			ts = mtod(m, struct bcm4313_tx_status *);
-			fid = le16toh(ts->frameid);
-			status = le16toh(ts->status);
-			if ((status & BCM4313_TX_STATUS_INTERMEDIATE) != 0 &&
-			    (status & BCM4313_TX_STATUS_AMPDU) == 0) {
-				/*
-				 * Partial indication (brcms_c_dotxstatus:
-				 * "INTERMEDIATE but not AMPDU", e.g. after a
-				 * successful RTS exchange); the frame is
-				 * completed by a later status.
-				 */
-				m_freem(m);
-				goto nextslot;
-			}
-			/*
-			 * Find the in-flight frame.  Statuses arrive in FIFO
-			 * order, so the oldest body slot with a matching
-			 * frame id is the one; the scan is bounded in case
-			 * a status lost its frame (already reclaimed).
-			 */
-			tslot = NULL;
-			for (n = 0, j = tx->r_in; n < tx->r_nslots;
-			    n++, j = (j + 1) % tx->r_nslots) {
-				if (tx->r_slots[j].s_type == BCM4313_SLOT_BODY &&
-				    tx->r_slots[j].s_ni != NULL &&
-				    tx->r_slots[j].s_frameid == fid) {
-					tslot = &tx->r_slots[j];
-					break;
-				}
-			}
-			if (tslot != NULL) {
-				memset(&txs, 0, sizeof(txs));
-				if (tslot->s_m != NULL) {
-					txs.pktlen = tslot->s_m->m_pkthdr.len;
-					txs.flags |=
-					    IEEE80211_RATECTL_STATUS_PKTLEN;
-				}
-				if ((status & BCM4313_TX_STATUS_ACK_RCV) != 0)
-					txs.status =
-					    IEEE80211_RATECTL_TX_SUCCESS;
-				else if ((status & BCM4313_TX_STATUS_SUPR_MASK)
-				    == BCM4313_TX_STATUS_SUPR_EXPTIME)
-					txs.status =
-					    IEEE80211_RATECTL_TX_FAIL_EXPIRED;
-				else if ((status & BCM4313_TX_STATUS_SUPR_MASK)
-				    != 0)
-					txs.status =
-					    IEEE80211_RATECTL_TX_FAIL_UNSPECIFIED;
-				else {
-					txs.status =
-					    IEEE80211_RATECTL_TX_FAIL_LONG;
-					retries = (status &
-					    BCM4313_TX_STATUS_FRM_RTX_MASK) >>
-					    BCM4313_TX_STATUS_FRM_RTX_SHIFT;
-					txs.flags |=
-					    IEEE80211_RATECTL_STATUS_LONG_RETRY;
-					txs.long_retries =
-					    (retries > 0) ? retries : 1;
-				}
-				ieee80211_ratectl_tx_complete(tslot->s_ni, &txs);
-				ieee80211_free_node(tslot->s_ni);
-				tslot->s_ni = NULL;
-			} else
-				sc->sc_txnomatch++;
-			m_freem(m);
-			sc->sc_txdone++;
+	for (n = 0; n < BCM4313_TXS_MAX; n++) {
+		s1 = bcm4313_read_4(sc, BCM4313_D11_FRMTXSTATUS);
+		if (!bcm4313_intstatus_valid(s1)) {
+			device_printf(sc->sc_dev,
+			    "txstatus: core not responding; MAC stopped, "
+			    "re-up to recover\n");
+			sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
+			bcm4313_write_4(sc, BCM4313_D11_MACCONTROL,
+			    bcm4313_read_4(sc, BCM4313_D11_MACCONTROL) &
+			    ~(BCM4313_MCTL_EN_MAC | BCM4313_MCTL_PSM_RUN));
+			return;
 		}
-nextslot:
-		ring->r_in = (ring->r_in + 1) % ring->r_nslots;
+		if ((s1 & BCM4313_TXS_V) == 0)
+			break;			/* no more statuses */
+		s2 = bcm4313_read_4(sc, BCM4313_D11_FRMTXSTATUS2);
+		status = s1 & BCM4313_TXS_STATUS_MASK;
+		fid = (s1 & BCM4313_TXS_FID_MASK) >> BCM4313_TXS_FID_SHIFT;
+		if ((status & BCM4313_TX_STATUS_INTERMEDIATE) != 0 &&
+		    (status & BCM4313_TX_STATUS_AMPDU) == 0) {
+			/*
+			 * Partial indication (brcms_c_dotxstatus:
+			 * "INTERMEDIATE but not AMPDU", e.g. after a
+			 * successful RTS exchange); the frame is completed
+			 * by a later status.
+			 */
+			continue;
+		}
+		/*
+		 * Find the in-flight frame.  Statuses arrive in FIFO order,
+		 * so the oldest body slot with a matching frame id is the
+		 * one; the scan is bounded in case a status lost its frame
+		 * (already reclaimed).
+		 */
+		tslot = NULL;
+		for (j = tx->r_in; j != tx->r_out; j = (j + 1) % tx->r_nslots) {
+			if (tx->r_slots[j].s_type == BCM4313_SLOT_BODY &&
+			    tx->r_slots[j].s_ni != NULL &&
+			    tx->r_slots[j].s_frameid == fid) {
+				tslot = &tx->r_slots[j];
+				break;
+			}
+		}
+		if (tslot != NULL) {
+			memset(&txs, 0, sizeof(txs));
+			if (tslot->s_m != NULL) {
+				txs.pktlen = tslot->s_m->m_pkthdr.len;
+				txs.flags |= IEEE80211_RATECTL_STATUS_PKTLEN;
+			}
+			if ((status & BCM4313_TX_STATUS_ACK_RCV) != 0)
+				txs.status = IEEE80211_RATECTL_TX_SUCCESS;
+			else if ((status & BCM4313_TX_STATUS_SUPR_MASK) ==
+			    BCM4313_TX_STATUS_SUPR_EXPTIME)
+				txs.status = IEEE80211_RATECTL_TX_FAIL_EXPIRED;
+			else if ((status & BCM4313_TX_STATUS_SUPR_MASK) != 0)
+				txs.status =
+				    IEEE80211_RATECTL_TX_FAIL_UNSPECIFIED;
+			else {
+				txs.status = IEEE80211_RATECTL_TX_FAIL_LONG;
+				retries = (status &
+				    BCM4313_TX_STATUS_FRM_RTX_MASK) >>
+				    BCM4313_TX_STATUS_FRM_RTX_SHIFT;
+				txs.flags |=
+				    IEEE80211_RATECTL_STATUS_LONG_RETRY;
+				txs.long_retries = (retries > 0) ? retries : 1;
+			}
+			ieee80211_ratectl_tx_complete(tslot->s_ni, &txs);
+			ieee80211_free_node(tslot->s_ni);
+			tslot->s_ni = NULL;
+		} else
+			sc->sc_txnomatch++;
+		sc->sc_txdone++;
 	}
-	bcm4313_rx_refill(sc, ring);
 }
 
 /*
@@ -1837,19 +1864,20 @@ bcm4313_intrtask(void *arg, int pending)
 	if (reason & BCM4313_MI_DMAINT) {
 		bcm4313_tx_reclaim(sc, &sc->sc_tx, 0);
 		bcm4313_rx_harvest(sc, &sc->sc_rx);
-		bcm4313_txstatus_harvest(sc, &sc->sc_txstatus);
+		bcm4313_txstatus_drain(sc);
 		sc->sc_watchdog_timer = 5;
 	}
 	if (reason & (BCM4313_MI_MACTXERR | BCM4313_MI_PHYTXERR))
 		counter_u64_add(sc->sc_ic.ic_oerrors, 1);
 	if (reason & BCM4313_MI_TFS) {
 		/*
-		 * TX statuses pending: drain the status ring so the ucode can
-		 * post completions for further frames.  Without this the status
-		 * FIFO fills, the TX path wedges and the watchdog is forced to
-		 * reset the MAC.  (brcmsmac: MI_TFS -> brcms_b_txstatus().)
+		 * TX statuses pending in the frmtxstatus register pair: drain
+		 * them so the ucode can post completions for further frames.
+		 * Without this the status path stalls and the watchdog is
+		 * forced to reset the MAC.  (brcmsmac: MI_TFS ->
+		 * brcms_b_txstatus().)
 		 */
-		bcm4313_txstatus_harvest(sc, &sc->sc_txstatus);
+		bcm4313_txstatus_drain(sc);
 		bcm4313_tx_reclaim(sc, &sc->sc_tx, 0);
 		sc->sc_watchdog_timer = 5;
 	}
@@ -1929,8 +1957,7 @@ bcm4313_fifo_errors_locked(struct bcm4313_softc *sc)
 {
 	static const uint8_t fifos[] = {
 	    BCM4313_RX_FIFO,		/* 0: RX data */
-	    BCM4313_TX_BE_FIFO,		/* 1: TX data */
-	    BCM4313_RX_TXSTATUS_FIFO	/* 3: TX status */
+	    BCM4313_TX_BE_FIFO		/* 1: TX data */
 	};
 	uint32_t intstatus;
 	int fatal, i;
@@ -1948,8 +1975,10 @@ bcm4313_fifo_errors_locked(struct bcm4313_softc *sc)
 		 */
 		if (!bcm4313_intstatus_valid(intstatus)) {
 			device_printf(sc->sc_dev, "DMA core not responding "
-			    "(intstatus %#x); MAC stopped, re-up to recover\n",
-			    intstatus);
+			    "(intstatus %#x macintstatus %#x maccontrol %#x); "
+			    "MAC stopped, re-up to recover\n", intstatus,
+			    bcm4313_read_4(sc, BCM4313_D11_MACINTSTATUS),
+			    bcm4313_read_4(sc, BCM4313_D11_MACCONTROL));
 			sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
 			bcm4313_write_4(sc, BCM4313_D11_MACCONTROL,
 			    bcm4313_read_4(sc, BCM4313_D11_MACCONTROL) &
@@ -2102,7 +2131,6 @@ bcm4313_stop_locked(struct bcm4313_softc *sc)
 	/* Stop DMA and reclaim state. */
 	bcm4313_ring_stop(sc, &sc->sc_tx);
 	bcm4313_ring_stop(sc, &sc->sc_rx);
-	bcm4313_ring_stop(sc, &sc->sc_txstatus);
 
 	/* Drain the transmit queue. */
 	while ((m = mbufq_dequeue(&sc->sc_snd)) != NULL) {
@@ -2218,8 +2246,6 @@ bcm4313_init_locked(struct bcm4313_softc *sc)
 	if (bcm4313_ring_tx_init(sc, &sc->sc_tx) != 0)
 		goto fail;
 	if (bcm4313_ring_rx_init(sc, &sc->sc_rx) != 0)
-		goto fail;
-	if (bcm4313_ring_rx_init(sc, &sc->sc_txstatus) != 0)
 		goto fail;
 
 	/* Interrupts. */
@@ -2345,9 +2371,9 @@ bcm4313_sysctl_setup(struct bcm4313_softc *sc)
 	SYSCTL_ADD_INT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
 	    "dmarx", CTLFLAG_RD, &sc->sc_rx.r_in, 0,
 	    "RX ring consumer position");
-	SYSCTL_ADD_INT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
-	    "dmatxstatus", CTLFLAG_RD, &sc->sc_txstatus.r_in, 0,
-	    "TX-status ring consumer position");
+	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
+	    "dmatxstatus", CTLFLAG_RD, &sc->sc_txdone, 0,
+	    "TX statuses drained from the frmtxstatus registers");
 	SYSCTL_ADD_UINT(ctx, SYSCTL_CHILDREN(root), OID_AUTO,
 	    "txframes", CTLFLAG_RD, &sc->sc_txframes, 0,
 	    "Frames posted to the DMA TX ring");
@@ -2633,10 +2659,6 @@ bcm4313_attach(device_t dev)
 	    BCM4313_D11_FIFO_DMA_RX(BCM4313_RX_FIFO), BCM4313_NRX_DESC,
 	    0, BCM4313_RXBUFSZ, 0)) != 0)
 		goto fail;
-	if ((error = bcm4313_ring_alloc(sc, &sc->sc_txstatus,
-	    BCM4313_D11_FIFO_DMA_RX(BCM4313_RX_TXSTATUS_FIFO),
-	    BCM4313_NTXSTATUS_DESC, 0, BCM4313_TXSTATUS_LEN, 0)) != 0)
-		goto fail;
 
 	/* net80211. */
 	ic = &sc->sc_ic;
@@ -2768,7 +2790,6 @@ bcm4313_detach(device_t dev)
 	}
 	bcm4313_ring_free(&sc->sc_tx);
 	bcm4313_ring_free(&sc->sc_rx);
-	bcm4313_ring_free(&sc->sc_txstatus);
 	if (sc->sc_bufdtag != NULL) {
 		bus_dma_tag_destroy(sc->sc_bufdtag);
 		sc->sc_bufdtag = NULL;
