@@ -265,6 +265,43 @@ If the wedge recurs, the improved diagnostic prints macintstatus/maccontrol
 alongside the all-ones intstatus, which distinguishes a clock-gated core
 from a bus-stuck controller.
 
+## Improvement round: WME/EDCF programming, per-frame radiotap, attach rescan (2026-11-19)
+
+Web-research findings first:
+
+- **bhnd(4) is not deprecated** -- not on the FreeBSD DeprecationPlan as of
+  the Sep 2025 update, still present in 14.x/15.x release notes; the tree's
+  active Broadcom wireless work is the LinuxKPI/brcmfmac path, but nothing
+  invalidates this port's bus strategy.  Sources: FreeBSD Wiki
+  DeprecationPlan; FreeBSD Foundation "Broadcom Wi-Fi Modernization".
+- Upstream brcmsmac guards `brcms_c_wme_setparams` with a `!wlc->clk` check
+  (from the Tx-rework series) -- EDCF writes must not happen clockless; the
+  port gates on FLAG_RUNNING, which is the same idea.
+
+Changes in this round:
+
+1. **WME/EDCF hardware programming** (`bcm4313_wme_update`, hooked as
+   `vap->iv_wme_update`).  The port advertised IEEE80211_C_WME but never
+   programmed the ucode's EDCF SHM entries, so hardware contention timing
+   stayed at initval defaults instead of tracking the AP's EDCA.  Now each
+   AC is converted (net80211 stores CW as log2, txop in 32us units -- the
+   same units as upstream's EDCF_TXOP2USEC) and written to
+   `M_EDCF_QINFO + fifo*32` with the `WME_STATUS_NEWAC` reload flag, exactly
+   like `brcms_c_wme_setparams`.  Note the AC->fifo map is {BE:1, BK:0,
+   VI:2, VO:3}; the port only enables DMA on fifo 1, so the BE entry is the
+   one that governs real traffic, the others are upstream parity.
+2. **Per-frame monitor-mode radiotap** (bwn(4) pattern): the RX template is
+   now refreshed per frame under the lock before delivery --
+   `wr_antsignal` (the fixed LCN RSSI), `wr_flags` (CCK short preamble from
+   `PRXS0_SHORTH`), `wr_rate` (decoded from the PLCP signal byte captured
+   before stripping, via the `PRXS0_FT` framing type; HT frames report 0),
+   and the current channel from `ic_curchan` fields directly.  The flag is
+   `IEEE80211_RADIOTAP_F_SHORTPRE` (0x02) -- verified against
+   ieee80211_radiotap.h; the initially remembered name was wrong.
+3. **install.sh attach retry**: after a reload with no device, rescan the
+   card's parent PCI bus (`devctl rescan`, derived from the `chip=0x472714e4`
+   pciconf line) so newbus gets another probe on a stuck-unclaimed device.
+
 ## More brcmsmac behavior worth porting (audit)
 
 Re-checked against the bundled tree after the MI_RFDISABLE and DMA-FIFO

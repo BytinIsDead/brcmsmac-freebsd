@@ -225,6 +225,18 @@ MALLOC_DECLARE(M_BCM4313);
 #define	BCM4313_M_FIFOSIZE2		(0x04e * 2)
 #define	BCM4313_M_FIFOSIZE3		(0x04f * 2)
 #define	BCM4313_M_CURCHANNEL		(0x050 * 2)
+
+/* WME/EDCF SHM (d11.h: per-AC contention params the ucode honors; upstream
+ * brcms_c_wme_setparams).  Entries are 32 bytes, one per TX fifo, written
+ * as u16 fields; the status word carries WME_STATUS_NEWAC for reload. */
+#define	BCM4313_M_EDCF_QINFO		(0x120 * 2)
+#define	BCM4313_M_EDCF_QLEN		(16 * 2)
+#define	BCM4313_M_EDCF_STATUS_OFF	(0x007 * 2)
+#define	BCM4313_WME_STATUS_NEWAC	(1 << 8)
+#define	BCM4313_D11_TSFRANDOM		0x65A
+
+/* net80211 AC index -> d11 TX fifo (brcmsmac wme_ac2fifo). */
+#define	BCM4313_WME_AC2FIFO(ac)		((const uint8_t[]){ 1, 0, 2, 3 }[ac])
 #define	BCM4313_M_BCMC_FID		(0x054 * 2)
 #define	BCM4313_M_EDCF_QINFO		(0x120 * 2)
 #define	BCM4313_M_TXF_CUR_INDEX		(0x018 * 2)
@@ -467,6 +479,11 @@ struct bcm4313_d11rxhdr {
 /* PhyRxStatus_2 (LCN): RX gain index the packet was received with. */
 #define	BCM4313_PRXS2_GIDX_MASK		0xFC00
 #define	BCM4313_PRXS2_GIDX_SHIFT	10
+/* PhyRxStatus_0: framing type (CCK/OFDM/HT) and CCK short preamble. */
+#define	BCM4313_PRXS0_FT_MASK		0x0003
+#define	BCM4313_PRXS0_FT_CCK		0
+#define	BCM4313_PRXS0_FT_OFDM		1
+#define	BCM4313_PRXS0_SHORTH		0x0080
 
 /*
  * TX status comes from the frmtxstatus/frmtxstatus2 register pair (d11.h

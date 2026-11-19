@@ -156,6 +156,18 @@ while [ "$attempt" -lt 2 ]; do
     sleep 1
     kldload if_bcm4313 2>/dev/null
     sleep 3
+    # If the card is on the bus but stuck unclaimed, rescan its parent PCI
+    # bus so newbus gets another shot at probing it.
+    if [ -z "$WLDEV" ] && command -v devctl >/dev/null 2>&1; then
+        BUS="$(pciconf -l 2>/dev/null | awk -F'@' '/chip=0x472714e4/ {split($2, a, ":"); print "pci" a[2]; exit}')"
+        if [ -n "$BUS" ]; then
+            fb_note "devctl rescan $BUS (card visible but unclaimed)"
+            devctl rescan "$BUS" 2>/dev/null || true
+            sleep 2
+            WLDEV="$(fb_find_wldev)"
+            [ -n "$WLDEV" ] && break
+        fi
+    fi
     WLDEV=""
     attempt=$((attempt + 1))
 done

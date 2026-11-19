@@ -106,6 +106,8 @@ static void	bcm4313_sysctl_setup(struct bcm4313_softc *);
 static void	bcm4313_stop_locked(struct bcm4313_softc *);
 static int	bcm4313_detach(device_t);
 static int	bcm4313_ucode_download(struct bcm4313_softc *);
+static int	bcm4313_wme_update(struct ieee80211vap *,
+		    const struct wmeParams *);
 
 /* Ring sizes. */
 #define	BCM4313_NTX_DESC		64	/* 32 frames, 2 slots each */
@@ -724,6 +726,40 @@ static const int8_t bcm4313_lcn_gidx_pkt_rssi[] = {
 };
 
 /*
+ * Decode the received rate in 0.5 Mb/s units from the PLCP signal byte and
+ * the PHY framing type in PhyRxStatus_0 (for the monitor-mode radiotap RATE
+ * field; HT frames have no legacy rate code, so report 0 there).
+ */
+static uint8_t
+bcm4313_rx_rate(uint8_t plcp0, uint16_t prxs0)
+{
+	switch (prxs0 & BCM4313_PRXS0_FT_MASK) {
+	case BCM4313_PRXS0_FT_CCK:
+		switch (plcp0) {
+		case 0x0A: return (2);		/* 1 Mb/s */
+		case 0x14: return (4);		/* 2 Mb/s */
+		case 0x37: return (11);		/* 5.5 Mb/s */
+		case 0x6E: return (22);		/* 11 Mb/s */
+		}
+		return (0);
+	case BCM4313_PRXS0_FT_OFDM:
+		switch (plcp0 & 0x0f) {
+		case 0x0B: return (12);		/* 6 Mb/s */
+		case 0x0F: return (18);		/* 9 Mb/s */
+		case 0x0A: return (24);		/* 12 Mb/s */
+		case 0x0E: return (36);		/* 18 Mb/s */
+		case 0x09: return (48);		/* 24 Mb/s */
+		case 0x0D: return (72);		/* 36 Mb/s */
+		case 0x08: return (96);		/* 48 Mb/s */
+		case 0x0C: return (108);	/* 54 Mb/s */
+		}
+		return (0);
+	default:
+		return (0);			/* HT: MCS, not in template */
+	}
+}
+
+/*
  * Harvest received frames from an RX ring and feed them to net80211.
  *
  * Buffer layout (brcmsmac brcms_c_recv/brcms_c_recvctl, see
@@ -741,7 +777,8 @@ bcm4313_rx_harvest(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 	struct bcm4313_slot *slot;
 	struct mbuf *m;
 	uint32_t hw;
-	uint16_t rxlen, macrxs1, macrxs2, prxs1, prxs2;
+	uint16_t rxlen, macrxs1, macrxs2, prxs0, prxs1, prxs2;
+	uint8_t plcp0;
 	int gidx, rssi;
 	int i;
 
@@ -762,6 +799,7 @@ bcm4313_rx_harvest(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 			macrxs2 = le16toh(rxh->RxStatus2);
 			prxs1 = le16toh(rxh->PhyRxStatus_1);
 			prxs2 = le16toh(rxh->PhyRxStatus_2);
+			prxs0 = le16toh(rxh->PhyRxStatus_0);
 			if (rxlen < BCM4313_D11_PHY_HDR_LEN +
 			    IEEE80211_MIN_LEN + BCM4313_FCS_LEN ||
 			    rxlen > ring->r_bufsz - BCM4313_HWRXOFF ||
@@ -797,6 +835,9 @@ bcm4313_rx_harvest(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 				m_adj(m, 2);
 				sc->sc_rxpad++;
 			}
+			/* Capture the PLCP signal byte for the radiotap rate
+			 * field before the PLCP header is stripped. */
+			plcp0 = *(const uint8_t *)mtod(m, const void *);
 			m_adj(m, BCM4313_D11_PHY_HDR_LEN);
 			m_adj(m, -BCM4313_FCS_LEN);
 			/*
@@ -823,6 +864,22 @@ bcm4313_rx_harvest(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 					rssi += 7;
 				rssi += 2;
 			}
+			/*
+			 * Per-frame monitor-mode radiotap (bwn(4) pattern):
+			 * signal level, CCK short preamble, legacy rate and
+			 * the current channel.  The template is shared across
+			 * frames, so it is refreshed here under the lock
+			 * before delivery.
+			 */
+			sc->sc_rx_th.wr_antsignal = (int8_t)rssi;
+			sc->sc_rx_th.wr_flags =
+			    (prxs0 & BCM4313_PRXS0_SHORTH) ?
+			    IEEE80211_RADIOTAP_F_SHORTPRE : 0;
+			sc->sc_rx_th.wr_rate = bcm4313_rx_rate(plcp0, prxs0);
+			sc->sc_rx_th.wr_chan_freq =
+			    htole16(ic->ic_curchan->ic_freq);
+			sc->sc_rx_th.wr_chan_flags =
+			    htole16(ic->ic_curchan->ic_flags & 0xff);
 			sc->sc_rxframes++;
 			/*
 			 * Deliver to net80211 without the softc lock held:
@@ -1807,6 +1864,8 @@ bcm4313_vap_create(struct ieee80211com *ic, const char name[IFNAMSIZ],
 	/* Wrap the default state handler. */
 	bav->bv_newstate = vap->iv_newstate;
 	vap->iv_newstate = bcm4313_newstate;
+	/* Program the hardware EDCF/SHM entries on AP-EDCA changes. */
+	vap->iv_wme_update = bcm4313_wme_update;
 	/* Program our MAC address into the RCM. */
 	BCM4313_LOCK(sc);
 	bcm4313_set_macaddr(sc, mac);
@@ -1823,6 +1882,62 @@ bcm4313_vap_delete(struct ieee80211vap *vap)
 
 	ieee80211_vap_detach(vap);
 	free(bav, M_80211_VAP);
+}
+
+/*
+ * Program one WME/EDCF SHM entry (brcmsmac brcms_c_wme_setparams).  net80211
+ * hands us its per-AC params on every AP-EDCA change; convert and write the
+ * SHM entry for the AC's TX fifo, then flag the ucode to reload it.  cwmin/
+ * cwmax arrive as log2 from net80211 (wmep_logcw*), txop in 32us units.
+ * Only applied while the MAC is running (upstream skips when clockless).
+ */
+static int
+bcm4313_wme_update(struct ieee80211vap *vap,
+    const struct wmeParams *params)
+{
+	struct ieee80211com *ic = vap->iv_ic;
+	struct bcm4313_softc *sc = ic->ic_softc;
+	uint16_t entry, cwmin, cwmax, aifs, txop, status;
+	int ac, i;
+
+	BCM4313_LOCK(sc);
+	if ((sc->sc_flags & BCM4313_FLAG_RUNNING) == 0) {
+		BCM4313_UNLOCK(sc);
+		return (0);
+	}
+	for (ac = 0; ac < WME_NUM_AC; ac++) {
+		entry = BCM4313_M_EDCF_QINFO +
+		    BCM4313_WME_AC2FIFO(ac) * BCM4313_M_EDCF_QLEN;
+		txop = IEEE80211_TXOP_TO_US(params[ac].wmep_txopLimit);
+		aifs = params[ac].wmep_aifsn & 0x0f;
+		if (ac == IEEE80211_AC_VI && txop == 0 &&
+		    aifs < 15)
+			aifs++;
+		if (aifs < 1 || aifs > 15)
+			continue;
+		cwmin = (1 << params[ac].wmep_logcwmin) - 1;
+		cwmax = (1 << params[ac].wmep_logcwmax) - 1;
+		/* Flag the ucode to reload this entry (brcms_c_wme_setparams). */
+		status = bcm4313_shm_read_2(sc, entry +
+		    BCM4313_M_EDCF_STATUS_OFF) | BCM4313_WME_STATUS_NEWAC;
+		{
+			uint16_t vals[8];
+
+			vals[0] = txop;
+			vals[1] = cwmin;
+			vals[2] = cwmax;
+			vals[3] = cwmin;			/* cwcur */
+			vals[4] = aifs;
+			vals[5] = bcm4313_read_2(sc, BCM4313_D11_TSFRANDOM) &
+			    cwmin;				/* bslots */
+			vals[6] = vals[5] + aifs;		/* reggap */
+			vals[7] = status;
+			for (i = 0; i < 8; i++)
+				bcm4313_shm_write_2(sc, entry + i * 2, vals[i]);
+		}
+	}
+	BCM4313_UNLOCK(sc);
+	return (0);
 }
 
 /*
