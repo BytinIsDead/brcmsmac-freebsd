@@ -217,8 +217,9 @@ MALLOC_DECLARE(M_BCM4313);
 
 /*
  * Shared-memory (SHM) byte offsets; M_* names and values from brcmsmac
- * d11.h.  SHM is addressed in 16-bit words via the OBJADDR/OBJDATA window
- * (OBJADDR_SHM_SEL | (byteoff >> 1)).
+ * d11.h.  SHM is addressed through the OBJADDR/OBJDATA window: OBJADDR
+ * selects a 32-bit word with (byteoff >> 2), and OBJDATA+2 selects the
+ * upper 16-bit half when byteoff & 2.
  */
 #define	BCM4313_M_MACHW_VER		(0x00b * 2)
 #define	BCM4313_M_MACHW_CAP_L		(0x060 * 2)

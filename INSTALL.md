@@ -1,328 +1,203 @@
-# Getting your BCM4313 Wi-Fi working on FreeBSD
+# Build, install, and load
 
-A friendly, step-by-step guide to building and loading **if_bcm4313**, the
-FreeBSD driver for the Broadcom **BCM4313** Wi-Fi chip.
+This guide covers the driver module only. Once it is loaded, continue with
+[CONNECT.md](CONNECT.md).
 
-**What you're really doing:** taking the driver source in this folder,
-compiling it into a kernel module (a `.ko` file), and telling FreeBSD to load
-it, so the operating system can talk to your Wi-Fi chip and you can connect
-to a network. Three jobs: **build → load → connect**.
+## 1. Check the machine
 
-> **Quick check first — is your chip a BCM4313?**
-> Run `pciconf -lv | grep -A3 14e4` (Broadcom's vendor id is `14e4`). If you
-> see **`BCM4313`**, this guide is for you.
->
-> **Not a BCM4313?** This driver only speaks to the *softMAC* BCM4313 (and
-> 43224/43225). If your card is a **BCM943142HM / BCM43142**, that's a
-> *FullMAC* chip (Linux drives it with `brcmfmac` + proprietary firmware) —
-> **this driver will not attach to it.** FreeBSD doesn't ship a FullMAC
-> Broadcom driver, so that hardware needs a separate port.
-
----
-
-## The 30-second version
-
-If you already have FreeBSD installed with kernel source, this is all of it:
+You need a FreeBSD machine with kernel source matching the running kernel and a
+BCM4313 card.
 
 ```sh
-sh build.sh                                  # build -> if_bcm4313.ko
-kldload ./if_bcm4313.ko                      # driver + whole bhnd chain (auto)
-dmesg | grep -i bcm4313                      # did it attach?
-ifconfig wlan0 create wlandev <iface>        # make a wireless interface
-ifconfig wlan0 scan                          # see networks?
+uname -r
+uname -U
+pciconf -lv | grep -A3 -i 14e4
+ls /usr/src/sys/sys/param.h
 ```
 
-Or, as root, one shot — build, install into `/boot/modules`, (re)load,
-create `wlan0`, bring it up and scan, with an optional `boot` argument
-that also enables everything at startup:
+Expect a Broadcom device with PCI ID `14e4:4727`. This driver does not support
+BCM43142/FullMAC hardware or the N-PHY BCM43131/43224/43225/43236 family.
+
+Kernel modules must be built on FreeBSD against matching kernel headers. A
+Linux or macOS build host cannot produce a loadable module.
+
+## 2. Match the kernel source
+
+If `/usr/src/sys/sys/param.h` is missing, install the source package for the
+installed release or fetch the exact release tag. Do not use a moving `releng/`
+branch for a released kernel.
 
 ```sh
-sh install.sh            # build + install + kldload + wlan0 up + scan
-sh install.sh boot       # same, plus loader.conf + rc.conf entries
+uname -U    # for example, 1501000 for 15.1-RELEASE
+uname -r    # for example, 15.1-RELEASE
 ```
 
-Once the driver is up, join a network (DHCP included) and optionally persist
-it across reboots:
+For a custom kernel, build against its generated `opt_*.h` directory as well as
+the source tree.
+
+## 3. Build
+
+From this directory:
 
 ```sh
-sh config.sh MySSID MyPassword        # connect now + dhclient
-sh config.sh --boot MySSID MyPassword # same, plus reconnect at every boot
-sh config.sh                          # TUI (dialog): scan & pick a network
+sh build.sh check       # show the detected source/build paths and commands
+sh build.sh             # -> if_bcm4313.ko
 ```
 
-That's it — one `kldload` pulls in the PCI front-end and the entire `bhnd`
-bridge chain automatically (see Step 4).
-
-Everything below is the same thing, explained slowly.
-
----
-
-## Step 1 — What you need
-
-| Requirement | How to check it | What if it's missing |
-|---|---|---|
-| A FreeBSD machine (14.x or 15.x) | `uname -r` | Install FreeBSD first. |
-| Kernel source in `/usr/src/sys` | `ls /usr/src/sys/sys/param.h` | See Step 2. |
-| A compiler (comes with FreeBSD) | `cc --version` | Nothing to do — stock FreeBSD ships one. |
-
-You must do this on a **real FreeBSD machine** (or VM). Kernel drivers can't
-be built or tested on Linux/macOS — they compile against FreeBSD kernel
-headers and load only into a FreeBSD kernel.
-
-## Step 2 — Get the kernel source (if `/usr/src` is empty)
-
-The driver needs FreeBSD's kernel headers to build against. Two easy ways:
-
-**Way A — let FreeBSD give you the matching source** (recommended):
+Useful variants:
 
 ```sh
-sudo freebsd-update fetch
+sh build.sh debug       # BCM4313_DEBUG, -g, and extra driver messages
+sh build.sh clean
+sudo sh build.sh install
 ```
 
-then, during install, choose *Install source*. Or use `bsdinstall`'s "Install
-source" option on a fresh system. Either way `/usr/src` now matches your
-kernel exactly.
-
-**Way B — clone the exact release tag** (for power users):
+Environment overrides:
 
 ```sh
-uname -U    # prints something like 1501000  (= 15.1-RELEASE)
-git clone --depth 1 --branch release/15.1.0 https://github.com/freebsd/freebsd-src.git /usr/src
+SYSDIR=/path/to/freebsd/sys sh build.sh
+KERNBUILDDIR=/usr/obj/usr/src/amd64.amd64/sys/MYKERNEL sh build.sh
+JOBS=4 sh build.sh
 ```
 
-> **Why "release tag" and not `releng/15.1`?** `releng/15.1` is the
-> *development branch* — it keeps changing after the release ships, so its
-> headers don't match your installed 15.1-RELEASE kernel. The `release/15.1.0`
-> tag is the actual release. Mismatched headers = `version mismatch` when you
-> load the module (see Step 6).
-
-## Step 3 — Build the driver
-
-From this folder (the one with the `Makefile`), either:
+The equivalent direct build is:
 
 ```sh
-sh build.sh          # wrapper: auto-detects SYSDIR and KERNBUILDDIR
-# or, the long way:
 make SYSDIR=/usr/src/sys clean depend all
 ```
 
-You should see compiler output and end with a file called **`if_bcm4313.ko`**
-appearing in this folder. (`sh build.sh check` prints the exact commands
-without running them.)
+A previous baseline passed syntax/type checks on FreeBSD 14.2, 15.1, and
+then-current headers. The latest SHM/RX patch has not yet been rebuilt or loaded;
+see [TESTING.md](TESTING.md#verification-status).
 
-**Custom kernel?** If you built your FreeBSD kernel from a custom config, add
-`KERNBUILDDIR=` pointing at its build directory:
+## 4. Install and load
 
-```sh
-make SYSDIR=/usr/src/sys \
-    KERNBUILDDIR=/usr/obj/usr/src/amd64.amd64/sys/GENERIC \
-    clean depend all
-```
-
-(Change `amd64.amd64/sys/GENERIC` to your architecture and kernel name —
-`uname -mp` shows the architecture part.)
-
-## Step 4 — Load the driver
-
-Just load the module:
+### Recommended: use the deployment helper
 
 ```sh
-kldload ./if_bcm4313.ko
+sudo sh install.sh
 ```
 
-That one command does the whole job. The module carries its own **PCI
-front-end** and declares the full dependency chain, so the whole stack is
-built for you:
+This builds, installs, unloads any stale driver, destroys stale `wlan` VAPs,
+attempts a PCI reset when needed, loads the fresh module, creates `wlan0`, and
+scans. It also rescans the parent PCI bus if the card remains unclaimed.
 
-```
-PCI 14e4:4727 (your BCM4313 card)
-  └─ bcm4313_pci     our PCI front-end (inside this module)
-       └─ bhndb      PCI→bhnd bridge        (bhndb_pci.ko)
-            └─ bhnd  backplane bus          (bcma_bhndb.ko)
-                 └─ D11 core rev 24 → bcm4313 (this driver)
-```
-
-**Why is the front-end necessary?** The D11 core only becomes a device after
-a PCI driver claims the card and creates the bhnd bus. On FreeBSD that PCI
-driver is `bwn_pci` — but its device table lists only the BCM4331/43224/
-43225, **not the BCM4313**. So previously `kldload` succeeded yet nothing
-ever attached: no bridge, no bus, no D11 core, no interface. This module's
-own `bcm4313_pci` claims `14e4:4727` and builds the chain itself — no
-`/usr/src` patching, no rebuilding FreeBSD's own modules.
-
-`wlan(4)` needs nothing: it is compiled into the GENERIC kernel. Only a
-custom kernel that dropped `device wlan` needs `kldload wlan`.
-
-To load at every boot, install the module and enable it:
+To reuse an already-built module:
 
 ```sh
-make SYSDIR=/usr/src/sys install    # copies if_bcm4313.ko into /boot/kernel
+sudo sh install.sh --skip-build
 ```
 
+The helper prefers `/boot/modules/if_bcm4313.ko` when that file exists. When
+comparing builds, make sure a stale copy there is not hiding the newly built
+module; copying the same fresh `.ko` to both `/boot/modules` and `/boot/kernel`
+avoids ambiguity.
+
+### Manual load
+
+Copy the module to a known location and load that exact file:
+
+```sh
+sudo cp if_bcm4313.ko /boot/modules/if_bcm4313.ko
+sudo kldload /boot/modules/if_bcm4313.ko
 ```
+
+`make install` installs under `/boot/kernel`. Either location works when the
+loaded path is explicit. Loading `./if_bcm4313.ko` directly also works.
+
+The module pulls in `bhndb_pci`, `bhndb`, and `bcma_bhndb` automatically. GENERIC
+already includes `wlan(4)`; a custom kernel without it may need:
+
+```sh
+kldload wlan
+```
+
+## 5. Verify attachment
+
+```sh
+kldstat -m bhnd/if_bcm4313
+sysctl net.wlan.devices
+devinfo -r | grep -E 'bcm4313|bhnd'
+dmesg | tail -40
+```
+
+Expected shape:
+
+```text
+bcm4313_pci0 -> bhndb0 -> bhnd0 -> ... -> bcm43130
+```
+
+`net.wlan.devices` should contain `bcm43130`. The registered module name is
+`bhnd/if_bcm4313`; `kldstat -m if_bcm4313` is not a valid check.
+
+Create and inspect the wireless interface:
+
+```sh
+sudo ifconfig wlan0 create wlandev bcm43130
+sudo ifconfig wlan0 up
+ifconfig wlan0
+```
+
+`config.sh` and `install.sh` destroy and recreate their `WLANIF` (default
+`wlan0`). Set `WLANIF=wlan1` if you need to preserve an existing `wlan0`.
+
+## 6. Load at boot
+
+Choose one module-loading method:
+
+```sh
 # /boot/loader.conf
 if_bcm4313_load="YES"
 ```
 
-Prefer to keep everything in `rc.conf` instead? One `sysrc` line does the
-same job (the `kld` startup script loads the module at boot):
+or:
 
 ```sh
-sysrc kld_list+=if_bcm4313
+sudo sysrc kld_list+=if_bcm4313
 ```
 
-The bridge-chain modules are pulled in automatically by the module's
-dependencies.
+Then configure Wi-Fi as described in [CONNECT.md](CONNECT.md#boot-persistence).
+`sudo sh install.sh boot` can set up the module and launch
+`config.sh --boot` for the connection.
 
-**Did it work?** Check:
+## Troubleshooting
 
-```sh
-kldstat -m if_bcm4313                # is the module in memory?
-devinfo -r | grep -E 'bcm4313|bhnd'  # the whole chain, top to bottom
-dmesg | tail -20                     # recent kernel messages
-```
-
-`devinfo` should show the chain: `bcm4313_pci0` → `bhndb0` → `bhnd0` → … →
-`bcm43130`. If `bcm4313_pci0` is missing, you're running a stale module
-without the PCI front-end (Step 4).
-
-You want to see the driver *attaching* — e.g. a line mentioning
-`bcm4313` and the D11 core. Then look at your network interfaces:
-
-```sh
-ifconfig
-```
-
-The driver registers an interface (a name like `wlan0` after Step 5, or a
-base interface before it).
-
-> **Got `version mismatch`?** Your headers don't match your running kernel.
-> Go back to Step 2, get the *matching* source, rebuild, and `kldunload`
-> the old module first.
-
-## Step 5 — Connect to Wi-Fi
-
-> **Prefer a guided tool?** `sh config.sh` does this whole step for you: it
-> scans for networks, prompts for the password, runs DHCP and can persist
-> the connection across reboots (`--boot`). The manual steps below are what
-> it runs under the hood.
-
-**1. Create a wireless interface** over the driver's base interface
-(`<base_if>` is whatever the driver registered, e.g. `wlan0` if it's already
-the device name, or the name `ifconfig` showed):
-
-```sh
-ifconfig wlan0 create wlandev <base_if>
-```
-
-**2. Scan for networks** — sanity check that the radio works:
-
-```sh
-ifconfig wlan0 scan
-```
-
-You should see a list of nearby network names (SSIDs).
-
-**3. Join a network (WPA2)**. Create `/etc/wpa_supplicant.conf`:
-
-```
-network={
-    ssid="MyNetwork"
-    psk="my-password"
-}
-```
-
-then run:
-
-```sh
-wpa_supplicant -B -i wlan0 -c /etc/wpa_supplicant.conf
-dhclient wlan0
-```
-
-**4. Make it automatic at boot** — add to `/etc/rc.conf`:
-
-```
-wlans_wlan0="wlan0"
-ifconfig_wlan0="WPA DHCP"
-```
-
-Now `service netif restart` (or a reboot) brings up Wi-Fi by itself.
-
-## Step 6 — Common problems, explained plainly
-
-| You see... | What it means | What to do |
-|---|---|---|
-| `kldload: File exists` | Module already loaded | `kldunload if_bcm4313` first. |
-| `devinfo` shows no `bcm4313_pci0` | Old module without the PCI front-end | `git pull` and rebuild — `if_bcm4313_pci.c` is what creates the bridge chain. |
-| `version mismatch` | Headers ≠ running kernel | Rebuild against the release-tag source matching `uname -U`. |
-| Driver loads but no interface | Didn't attach to the chip | `sysctl net.wlan.devices` — if it lists `bcm43130`, attach worked and you just need `ifconfig wlan0 create wlandev bcm43130`. If empty, run `devinfo -r | grep -E 'bcm4313|bhnd'` — a missing `bcm4313_pci0` means the front-end didn't probe; otherwise `dmesg | tail` shows the failing attach step. |
-| `bcm43130: core reset failed: 22` | You're running a build with the old D11 core ioctl bits. The driver used to pass the clock bits that the `bhnd` backend owns exclusively (`BHND_IOCTL_CLK_EN`/`CLK_FORCE`) into `bhnd_reset_hw()`, and the bcma backend rejects that with `EINVAL` (22). | `git pull` and rebuild — current code uses brcmsmac's real `SICF_*` values (`SUPPORT_G=0x2000`, `PHYRESET=0x0008`, `PHYCLOCK_ENABLE=0x0004`) and lets the backend manage the clock bits itself. |
-| `panic: ieee80211_get_ratetable: no rate table for channel; freq 0 flags 0x0` (at attach, right after `D11 LCN ucode uploaded`) | The driver attached net80211 with an **empty channel list**: it called `ieee80211_add_channel_list_2ghz(..., NULL, 0, ...)`, which adds *zero* channels (the list iterator needs a real table), so `ieee80211_chan_init()` read a zeroed `ic_channels[0]` (freq 0 / flags 0x0). The `KASSERT` guards are compiled out on release kernels. Fixed in current code: `bcm4313_add_channels()` uses `ieee80211_add_channels_default_2ghz()` (channels 1–14) and fills `ic_channels`/`ic_nchans` before `ieee80211_ifattach()` — the same call and order `bwn`/`rtwn`/`ral` use. | `git pull` and rebuild. |
-| `bcm43130: firmware: missing LCN ucode size` | Section-tag off-by-one: the driver looked up `D11UCODE_OVERSIGHT24_LCNSZ` with index 12 instead of 13 (brcmsmac's `ucode_loader.h` enum), so it found the 40KB ucode section instead of the 4-byte size. Fixed in current code. | `git pull` and rebuild. |
-| `bcm43130: unsupported PHY type 15 (rev 15)` | Reading `PHYVER` as `0xFFFF` — the PHY registers aren't readable at probe time (type 15 = all-ones). Fixed in current code: attach brings the core out of reset with `PHYCLOCK_ENABLE \| SUPPORT_G` and *no* `PHYRESET`, exactly matching brcmsmac's `wlc_phy_attach()` (which enables the core with `SICF_GMODE \| SICF_PCLKE` before reading phyversion). | `git pull` and rebuild. |
-| `bcm43130: watchdog timeout: MAC stopped, re-up to recover` (was `watchdog timeout: resetting MAC`) then `BCMA_DMP_RESETSTATUS timeout` / `core reset failed: 60` | TX-status FIFO filled / TX wedged, then the old inline recovery reset hit masters still holding the backplane | Three bugs, all fixed: (1) TX statuses were only drained on the RX interrupt (`MI_DMAINT`) — the `MI_TFS` (1<<29) status-pending bit was never masked in or handled, so the status FIFO filled and TX wedged; (2) the watchdog reset the core while the D11 PSM was still running/hung; (3) the DMA engines were never properly disarmed before the core reset — clearing the DMA64 control register does not stop an engine mid-transaction, so its master stayed on the backplane and the DMP handshake never completed. Current code drains statuses on `MI_TFS`, and every watchdog recovery now **stops** the MAC (PSM `JMP_0`, run bits dropped) and lets the interface re-up perform the full stop → disarm → reset → init sequence; `stop_locked()` always disarms the DMA engines even when the watchdog already dropped the running flag. | `git pull` and rebuild — recovery is now a clean re-up instead of a dead card. |
-| `bcm43130: PSM microcode watchdog fired; MAC stopped, re-up to recover` | The D11 PSM (ucode) wedged — same condition brcmsmac treats as fatal | The driver halts the MAC, drops the running flag and unmasks `MI_GP0`; it deliberately does *not* auto-reset in a loop (repeated core resets on a fresh wedge grind the card into DMP timeouts). Recover with `ifconfig wlan0 down && ifconfig wlan0 up`; `init_locked()` restores the full interrupt mask. If this repeats on a build with the PSM bring-up, the ucode started but stopped making progress — capture `dmesg`, `sysctl dev.bcm4313.0.dmaerr` and the `list scan` output for a report. | `git pull` and rebuild; re-up the interface. |
-| `ifconfig wlan0` is `UP` and `list scan` even shows networks, but no frame ever crosses the air (`sysctl dev.bcm4313.0.rxframes` stays `0`, `dhclient` never completes) and it eventually degenerates into `PSM microcode watchdog fired` / `core reset failed: 60` | **The D11 PSM (microcode) was never started.** Nothing set `MCTL_PSM_RUN` (bit 1) or `MCTL_IHR_EN` (bit 10): `bcm4313_init_locked()` reset the core and `bcm4313_mac_enable()` then wrote a fresh `MCTL_EN_MAC \| MCTL_GMODE` value, so the ucode stayed parked at `MCTL_PSM_JMP_0` (PC 0) with the shared-memory window shut while net80211 was told the MAC was up — and the DMA/fifo poll then reported faults on a MAC that had never run. brcmsmac's `brcms_b_coreinit()` does: `maccontrol = MCTL_IHR_EN \| MCTL_PSM_JMP_0 \| MCTL_WAKE` → upload ucode → `maccontrol = MCTL_IHR_EN \| MCTL_INFRA \| MCTL_PSM_RUN \| MCTL_WAKE` → wait for `MI_MACSSPNDD`. | Fixed in current code: `bcm4313_psm_start_locked()` performs that sequence, reloads the ucode after every core reset, re-applies the driver's SHM/RCM configuration afterwards so the ucode initvals cannot clobber it, and gives up (reporting the all-ones core) instead of resetting a chip that has stopped answering. `bcm4313_mac_enable()` runs it whenever `MCTL_PSM_RUN` is clear, so it happens once per `ifconfig up` and never during calibration or periodic recalibration. **This is the fix that makes the MAC actually work** — rebuild and re-up. |
-| `bcm43130: DMA fifo N: …; DMA engine error; MAC stopped, re-up to recover` | A DMA engine faulted (descriptor/data/protocol error, RX fifo overflow or TX fifo underflow). Polled once per second from the watchdog, mirroring brcmsmac's `brcms_b_fifoerrors()` | The driver counts the fault per FIFO (`sysctl dev.bcm4313.0.dmaerr`), halts the PSM and drops the interface instead of resetting the core inline — a core reset under a live MAC is what produced the old `BCMA_DMP_RESETSTATUS timeout` / `core reset failed: 60` spiral that killed the card. Recover with `ifconfig wlan0 down && ifconfig wlan0 up`: the up path disarms every DMA engine before the reset (brcmsmac's `brcms_b_corereset` ordering). A one-off is self-healing; if it recurs constantly, capture `dmesg | tail -30` and the `dmaerr` sysctl — persistent descriptor errors usually mean a ring/descriptor bug worth an issue. |
-| `bcm43130: DMA core not responding (intstatus 0xffffffff)` / repeated `core reset failed: 60` after a DMA flood | The D11 core stopped answering register reads (wedged past the bus). The old build read that all-ones value as "every DMA error at once", ordered a core reset the core could never handshake, and failed permanently — the exact `fifo 0/1/3 × 5 errors → resetting MAC → RESETSTATUS timeout → core reset failed: 60` dmesg flood. | Fixed in current code: all-ones register reads are treated as "device not responding" (same as brcmsmac's `wlc_intstatus()`), no reset is ordered, and the state latches — the driver reports `core is dead; reload the driver (or power-cycle) to recover`. | `git pull` and rebuild; recover by `kldunload if_bcm4313 && kldload ./if_bcm4313.ko` (or reboot). |
-| `ifconfig wlan0 scan` finds no networks (attach itself is clean) | The D11 MAC is filtering beacons by BSSID during the scan | Old build: `scan_start`/`scan_end` were no-ops, so the MAC's RCM BSSID filter dropped every beacon not matching the currently programmed BSSID. Fixed in current code: `scan_start` sets `MCTL_BCNS_PROMISC` (0x00100000 — the same bit bwn's `bwn_scan_start` sets and brcmsmac raises for `FIF_BCN_PRBRESP_PROMISC`) and `scan_end` clears it. | `git pull` and rebuild. If still nothing, run `dmesg | tail -30` after `scan` — the next suspects are probe-request TX status handling and RX DMA. |
-| `ifconfig` shows nothing | The interface is simply down | Plain `ifconfig` hides down interfaces — use `ifconfig -a`. The base device is named `bcm43130` (from the module name), then `ifconfig wlan0 create wlandev bcm43130`. |
-| `ifconfig` has no `wlan` | `wlan(4)` missing | Built into GENERIC; only a custom kernel without `device wlan` needs `kldload wlan`. |
-| `bcm43130: hardware radio disabled (RF kill switch)` | The laptop's RF kill switch / Fn key is blocking the radio; the driver refused to start or stopped the MAC | Flip the switch, then `ifconfig wlan0 down && ifconfig wlan0 up`. An empty scan on a 4313 laptop is usually this, not a driver bug — `sysctl dev.bcm4313.0.rfkill` reads `1` while blocked. |
-| Loads but Wi-Fi is flaky | Usually SPROM/tuning issues | Set `sysctl dev.bcm4313.0.debug=2` (runtime, no rebuild) and collect `dmesg` output for a report. |
-| **No attach at all** | Chip isn't BCM4313 | If it's a BCM943142HM/BCM43142 (FullMAC), this softMAC driver can't drive it — see the note at the top. |
-
-## Driver diagnostics (`dev.bcm4313.*`)
-
-Runtime sysctls on the device node, no debug build needed:
-
-| sysctl | meaning |
+| Symptom | Check or fix |
 |---|---|
-| `dev.bcm4313.0.debug` | `0` quiet (default), `1` logs scan start/end, `2` also logs every channel hop |
-| `dev.bcm4313.0.fwinfo` | chip/PHY/radio identity read from SPROM at attach |
-| `dev.bcm4313.0.rfkill` | `1` = the hardware RF kill switch has disabled the radio (the driver stops the MAC); `0` = radio on |
-| `dev.bcm4313.0.txframes` | frames posted to the DMA TX ring |
-| `dev.bcm4313.0.rxframes` | frames actually delivered to net80211 |
-| `dev.bcm4313.0.txdone` | TX statuses harvested from the status ring |
-| `dev.bcm4313.0.wdogfires` | watchdog recoveries (TX timeout or DMA engine fault) + PSM watchdog events |
-| `dev.bcm4313.0.dmaerr` | per-FIFO DMA fault counts + FIFO/latched bits of the most recent fault (`fifo 0 0 0 0 0 0 0 0 last=1 bits=0x400` = one descriptor error on TX-BE) |
-| `dev.bcm4313.0.dmatx` / `dmarx` / `dmatxstatus` | live ring producer/consumer positions |
-| `dev.bcm4313.0.intrmask` | current MAC interrupt mask |
-| `dev.bcm4313.0.calticks` / `callastfull` / `calsample` / `calfires` | periodic temperature-based TX-power recalibration loop: `calticks` climbs 1/s while the MAC is up, `calsample` counts samples taken since the last recalibration, `calfires` counts glacial recalibrations (~1 per 3–4 min on tempsense boards) — soak-test with these |
+| `version mismatch` | Rebuild against source matching `uname -U` and the running kernel. Unload the old module first. |
+| `kldload: File exists` | The module is already loaded. Verify with `kldstat -m bhnd/if_bcm4313`. |
+| Module loads but no `bcm43130` | Inspect `devinfo -r` and `dmesg`. A missing `bcm4313_pci0` means the PCI front-end did not attach. `install.sh` retries and rescans the parent bus. |
+| `core reset failed: 22` | An old build passed bhnd-owned clock bits into `bhnd_reset_hw()`. Rebuild; the current code lets bhnd manage those bits. |
+| `unsupported PHY type 15 (rev 15)` | An old build read `PHYVER` while the PHY was held in reset. Rebuild; current probe releases reset with the PHY clock enabled and does not assert `PHYRESET`. |
+| `missing LCN ucode size` | An old build used firmware section index 12 instead of 13 for the LCN size. Rebuild. |
+| Panic about no rate table / `freq 0` | An old build attached net80211 before filling the channel list. Rebuild; channels 1-14 are now installed before `ieee80211_ifattach()`. |
+| Empty scan | Check `dev.bcm4313.0.rfkill`, use a 2.4 GHz AP on channel 1/6/11, set `dev.bcm4313.0.debug=3`, and collect the scan diagnostics. The latest max-frame-length fix still needs hardware confirmation. |
+| Scan shows networks but `rxframes` stays zero | Record the `SHM maxrx ...` line and `scan RX stats` from `dmesg`. `maxrx` must read `2346`; a small value indicates the old SHM bug. |
+| `DMA core not responding` or `core is dead` | Reload the module or power-cycle. A hard wedge can survive `kldunload`; `install.sh` attempts a PCI reset before reloading. |
+| `PSM microcode watchdog fired` | Recreate/up the interface once. If it repeats, preserve `dmesg`, DMA counters, and scan output instead of reset-looping. |
+| `SIOCS80211 ... op=20 ... Invalid Argument` | The inline `ifconfig wpakey` path is unsupported here. Use `wpa_supplicant -Dbsd` or `config.sh`. |
+| Associated but no IPv4 address | Run `dhclient wlan0`, inspect `dmesg`, and check that the AP is using a supported 2.4 GHz mode. |
+| No wireless interface in plain `ifconfig` | Down interfaces are hidden; use `ifconfig -a`, then create `wlan0` over `bcm43130`. |
 
-Bring the interface up, then: `rxframes` must climb as beacons arrive during a
-scan, and `txdone` should track `txframes` once TX is moving. If `rxframes`
-stays at 0 while scanning, the RX path is dead — that alone tells you which
-side to debug.
-
-Still stuck? Grab everything at once and paste it in your report:
+## Diagnostics
 
 ```sh
-kldstat -m if_bcm4313; kldstat -m bhnd; echo ---; \
-  sysctl net.wlan.devices; echo ---; dmesg | tail -40; echo ---; \
-  pciconf -lv | grep -iA5 broadcom; uname -a; uname -U
+sudo sh diag.sh
 ```
 
-## For developers
+The report includes kernel version, modules, PCI/device-tree state,
+`net.wlan.devices`, all `dev.bcm4313.*` sysctls, and recent kernel messages.
+Paste the complete output when reporting a failure.
 
-- **Runtime debug prints:** `sysctl dev.bcm4313.0.debug=2` logs scan
-  start/end and every channel hop; no rebuild needed. The compile-time
-  `-DBCM4313_DEBUG` option (or `#define BCM4313_DEBUG 1` in `opt_bcm4313.h`)
-  still adds per-frame debug (txstatus details) on top.
-- **Regenerate the embedded tables/microcode** from the bundled sources:
+Common runtime checks:
 
-  ```sh
-  perl gen_lcntab.pl                 # -> bcm4313_lcntab.h
-  perl gen_phytbl.pl > bcm4313_phytbl_lcn.h
-  perl gen_ucode.pl                  # -> bcm4313_ucode.c/.h
-  ```
+```sh
+sysctl dev.bcm4313.0.fwinfo
+sysctl dev.bcm4313.0.rfkill
+sysctl dev.bcm4313.0.txframes dev.bcm4313.0.rxframes dev.bcm4313.0.txdone
+sysctl dev.bcm4313.0.dmaerr
+sudo sysctl dev.bcm4313.0.debug=3
+```
 
-- **No firmware files needed** — the D11/LCN microcode and RF tables are
-  compiled into the module. That's why there's no `/boot/modules/<fw>` step.
-
-## More docs
-
-- [`README.md`](README.md) — what the driver is and how it's put together
-- [`COMPATIBILITY.md`](COMPATIBILITY.md) — FreeBSD version support matrix
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — how the port maps to Linux `brcmsmac`
-- [`TESTING.md`](TESTING.md) — what's verified, and the hardware test deck
+`debug=3` adds SHM readback, channel changes, scan counter summaries, and a
+small number of RX/TX samples. Return to quiet operation with `debug=0`.

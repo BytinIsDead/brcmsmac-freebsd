@@ -1,100 +1,190 @@
-# Testing & verification
+# Testing and verification
 
-What has been verified, how to reproduce it, and how to run the definitive
-hardware test.
+A successful build is necessary but not sufficient. The definitive test is a
+fresh module on real BCM4313 hardware, starting from a cold power cycle.
 
-## What "build-verified" means here
+## Verification status
 
-The strongest check performed in this project's environment is a full
-compilation of every driver source file against the **real FreeBSD kernel
-headers** for a specific release, using the kernel's own warning set:
+| Area | Status |
+|---|---|
+| SHM offsets and scan-counter offsets | Checked against the bundled brcmsmac headers |
+| Shell syntax for the helper scripts | `sh -n` passed |
+| Whitespace/error checks | `git diff --check` passed |
+| Previous source baseline on FreeBSD 14.2 | Recorded clean `-fsyntax-only` check, plain and `BCM4313_DEBUG` |
+| Previous source baseline on FreeBSD 15.1 | Recorded clean `-fsyntax-only` check, plain and `BCM4313_DEBUG` |
+| Previous source baseline on then-current headers | Recorded clean `-fsyntax-only` check |
+| Latest SHM/PHY/radio/RCM patch | **Not rebuilt or hardware-tested yet** |
+| Beacon/probe-response reception | **Pending** |
+| Scan results, association, DHCP, and sustained traffic | **Pending** |
+| N-PHY family support | Not implemented |
 
-```
-clang -fsyntax-only -ffreestanding -nostdinc \
-    -isystem "$(clang -print-resource-dir)/include" \
-    -I<bhnd-if-generated-dir> \
-    -I<sysroot>/sys -I<sysroot>/sys/dev/bhnd \
-    -I<sysroot>/sys/contrib/ck/include \
-    -D_KERNEL -DKLD_MODULE -D__FreeBSD__ \
-    -Wall -Wextra -Wno-unused-parameter -Wno-cast-qual -Wno-sign-compare \
-    if_bcm4313.c if_bcm4313_phy_lcn.c bcm4313_ucode.c
-```
+Earlier hardware runs reached attach, microcode upload, DMA activity, and
+short control-frame RX. They did not clear the management-RX, association, or
+DHCP gates.
 
-The `<sysroot>` is the checked-out FreeBSD source tree for the release under
-test, and the `<bhnd-if-generated-dir>` holds the `makeobjops`-generated
-`*_if.h` / `bhnd_nvram_map.h` / `machine` → `amd64/include` symlinks. A clean
-run means **zero driver-originated diagnostics** (only upstream header noise
-such as `-Wignored-qualifiers` in `net/debugnet.h` and
-`net80211/ieee80211_crypto.h`).
+## Local checks before deployment
 
-Re-run the same command with `-DBCM4313_DEBUG` added to also validate the debug
-printing paths.
-
-## Reproducibility checks
-
-- **Generated artifacts**: `gen_*.pl` output is byte-compared to the checked-in
-  `bcm4313_ucode.c/.h`, `bcm4313_lcntab.h`, `bcm4313_phytbl_lcn.h`. They must be
-  identical after regeneration (see [`ARCHITECTURE.md`](ARCHITECTURE.md)).
-- These checks run in CI-less local tooling; there is no GitHub Actions config
-  in this repo.
-
-## Limitations of CI-style checks
-
-- `-fsyntax-only` stops at the front end: it does **not** link `if_bcm4313.ko`,
-  run `make` / the kernel build glue, or load the device.
-- It cannot exercise the D11 MAC core, upload microcode, or touch the radio.
-
-> So a green build is necessary but **not** sufficient. The definitive test is
-> loading the module on real BCM4313 hardware.
-
-## Definitive hardware test (FreeBSD 15.1 example)
-
-On a FreeBSD **15.1-RELEASE** amd64 machine with a BCM4313:
+On a shell with Git and POSIX `sh` available:
 
 ```sh
-# 1. source matching the running kernel
-uname -U                          # expect 1501000
-make SYSDIR=/usr/src/sys clean depend all     # -> if_bcm4313.ko
-
-# 2. dependencies (the driver pulls in its own bhnd bridge chain;
-#    wlan(4) is compiled into GENERIC -- only custom kernels need it)
-kldstat -m wlan || kldload wlan
-
-# 3. attach
-kldload ./if_bcm4313.ko
-
-# 4. confirm the PCI front-end built the chain and the D11 core registered
-devinfo -r | grep -E 'bcm4313|bhnd'    # bcm4313_pci0 -> bhndb0 -> bhnd0 -> bcm43130
-dmesg | grep -i bcm4313
-ifconfig -v | grep -A2 -i "bcm4313\|wlan"
-
-# 5. bring up a wlan VAP and scan
-ifconfig wlan0 create wlandev <base_if>
-ifconfig wlan0 scan        # list visible APs
-
-# 6. functional: join a 2.4GHz WPA2 network
-wpa_passphrase MyNetwork "ssid!passphrase" > /tmp/w.cnf
-wpa_supplicant -B -i wlan0 -c /tmp/w.cnf
-dhclient wlan0
+sh -n build.sh install.sh config.sh diag.sh lib.sh
+git diff --check
 ```
 
-### Pass criteria checklist
+These checks do not compile kernel code. Build on FreeBSD against matching
+kernel source:
 
-- [ ] `kldload` succeeds with no `version mismatch`
-- [ ] `dmesg` shows the driver attaching to `bhnd`/D11 core rev 24
-- [ ] microcode upload reported without error
-- [ ] `ifconfig wlan0 scan` lists real APs
-- [ ] association at each of 802.11b/g/n rates, HT20, MCS 0–7
-- [ ] sustained `iperf3` RX/TX with no watchdog-timeout / dropped-ring errors
-- [ ] `hw.bcm4313.debug=1` and a scan shows sane RSSI values
+```sh
+uname -U
+sh build.sh check
+sh build.sh
+# Optional debug build:
+sh build.sh debug
+```
 
-## Debugging a failure
+A previous full syntax/type check used the kernel warning set and real kernel
+headers under `-ffreestanding -D_KERNEL -DKLD_MODULE`. Repeat that check, or a
+full module build, after changing the current RX patch. Syntax-only checking
+does not link the `.ko` or exercise hardware.
 
-- Enable `hw.bcm4313.debug=1` (module must be loaded with `BCM4313_DEBUG`
-  compiled in to see prints).
-- Watch for `dmesg` panics from `KASSERT` in the DMA callbacks — these point at
-  a chunking / descriptor-layout issue on the real ring width.
-- Confirm the SPROM/board flags read back (look for `bhnd_nvram` warnings at
-  attach); the RF tables are picked from these.
-- Collect `uname -a && uname -U`, the kernel source rev, and the full
-  `dmesg | tail` for a report (see [`COMPATIBILITY.md`](COMPATIBILITY.md)).
+## Definitive cold-power-cycle test
+
+Use a FreeBSD 15.1-RELEASE amd64 machine when reproducing the current bring-up.
+A cold power cycle matters: DMP/DMA wedge state can survive `kldunload` and a
+warm reboot.
+
+### 1. Deploy the exact module
+
+```sh
+sh build.sh
+sudo cp if_bcm4313.ko /boot/modules/if_bcm4313.ko
+```
+
+If an older driver is loaded, use `sudo sh install.sh --skip-build` rather than
+unloading it while a `wlan` interface still references it. Confirm the loaded
+file and registered module:
+
+```sh
+kldstat | grep if_bcm4313
+kldstat -m bhnd/if_bcm4313
+```
+
+### 2. Verify attach and enable diagnostics before `up`
+
+```sh
+sysctl net.wlan.devices
+devinfo -r | grep -E 'bcm4313|bhnd'
+dmesg | grep -i bcm4313
+sudo sysctl dev.bcm4313.0.debug=3
+sudo ifconfig wlan0 create wlandev bcm43130
+sudo ifconfig wlan0 up
+```
+
+Expected device chain:
+
+```text
+bcm4313_pci0 -> bhndb0 -> bhnd0 -> ... -> bcm43130
+```
+
+Expected SHM readback during MAC start:
+
+```text
+SHM maxrx 2346 slot 9|20 channel N
+```
+
+`maxrx` must be `2346`. The old bug produced `9` or `20` here because the slot
+write landed on `M_MAXRXFRM_LEN`.
+
+### 3. Prove management-frame reception
+
+Keep a known 2.4 GHz AP active on channel 1 or 6:
+
+```sh
+ifconfig wlan0 scan
+ifconfig wlan0 list scan
+sysctl dev.bcm4313.0.rxframes
+dmesg | tail -60
+```
+
+Pass this gate only if all of the following hold:
+
+- `rxframes` increases during the scan.
+- `list scan` returns real AP entries with plausible signal values.
+- `toolong` in `scan RX stats` is not explaining away the received traffic.
+- There is no dead-core latch, PSM watchdog, or DMA error flood.
+
+Do not accept reception of 20-byte ACK/CF-End frames as proof of this gate.
+Those frames fit inside the old, incorrectly small maximum frame length.
+
+### 4. Prove association and DHCP
+
+Use a WPA2 AP on 2.4 GHz:
+
+```sh
+sudo sh config.sh MySSID MyPassword
+ifconfig wlan0
+netstat -rn
+ping -c3 192.168.1.1    # router address
+ping -c3 8.8.8.8
+```
+
+Pass requires `status: associated`, an IPv4 address, a default route, and
+working traffic. Capture `wpa_supplicant`/`dmesg` output if any stage fails.
+
+### 5. Soak and recovery
+
+- Exchange traffic in both directions for at least 15 minutes.
+- Watch `txframes`, `rxframes`, `txdone`, `txnomatch`, `dmaerr`, and `wdogfires`.
+- On tempsense boards, `calticks` should advance while the MAC is up and
+  `calfires` should eventually increase during a long enough run.
+- Recreate the interface once and verify recovery.
+- Reboot once and verify boot-time module loading and Wi-Fi reconnection.
+
+```sh
+sysctl dev.bcm4313.0.txframes dev.bcm4313.0.rxframes
+sysctl dev.bcm4313.0.txdone dev.bcm4313.0.txnomatch
+sysctl dev.bcm4313.0.wdogfires dev.bcm4313.0.dmaerr
+sysctl dev.bcm4313.0.calticks dev.bcm4313.0.calfires
+```
+
+## Acceptance checklist
+
+- [ ] Fresh module loads without a version mismatch.
+- [ ] PCI front-end, bhnd chain, and `bcm43130` attach cleanly.
+- [ ] Microcode upload completes and the PSM self-suspend handshake succeeds.
+- [ ] SHM readback reports `maxrx 2346`.
+- [ ] A scan returns real APs and `rxframes` increases.
+- [ ] Association succeeds on a 2.4 GHz WPA2 network.
+- [ ] DHCP, routing, and ping work.
+- [ ] Sustained bidirectional traffic causes no watchdog/DMA/dead-core failure.
+- [ ] Interface re-up recovers cleanly.
+- [ ] Boot persistence reconnects after reboot.
+- [ ] Results are recorded as hardware-verified, with the tested FreeBSD release.
+
+## Failure report
+
+Run:
+
+```sh
+sudo sh diag.sh
+```
+
+Also include:
+
+```sh
+uname -a
+uname -U
+git -C /usr/src log -1 --oneline
+ifconfig wlan0 list scan
+dmesg | tail -80
+```
+
+For an empty scan, include the complete `SHM maxrx ...` and `scan RX stats`
+lines. For an association failure, include supplicant logs and the exact
+`ifconfig wlan0` state. Do not include Wi-Fi passwords in reports.
+
+Return to normal logging after diagnosis:
+
+```sh
+sudo sysctl dev.bcm4313.0.debug=0
+```

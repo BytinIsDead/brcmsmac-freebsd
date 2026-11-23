@@ -137,9 +137,6 @@ static int	bcm4313_wme_update(struct ieee80211vap *,
 #define	BCM4313_D11_RCM_MAT_DATA	0x422
 #define	BCM4313_D11_RCM_MAT_MASK	0x424
 #define	BCM4313_RCM_INC_DATA		0x0020
-#define	BCM4313_RCM_INC_MASK_L		0x0040
-#define	BCM4313_RCM_INC_MASK_H		0x0080
-#define	BCM4313_RCM_INDEX_MASK		0x001f
 #define	BCM4313_RCM_MAC_OFFSET		0
 #define	BCM4313_RCM_BSSID_OFFSET	3
 
@@ -199,25 +196,28 @@ bcm4313_postwrite_4(struct bcm4313_softc *sc, uint16_t reg)
 	(void)bcm4313_read_4(sc, reg);
 }
 
-/*
- * Shared-memory access: the D11 ucode SHM is a 16-bit word array accessed
- * through the OBJADDR/OBJDATA window (OBJADDR_SHM_SEL).  Offsets are in
- * bytes; the hardware addresses words.
- */
+/* SHM offsets are bytes; OBJADDR selects words and OBJDATA+2 the upper half. */
 uint16_t
 bcm4313_shm_read_2(struct bcm4313_softc *sc, uint16_t offset)
 {
+	uint16_t objoff = BCM4313_D11_OBJDATA + ((offset & 2) ? 2 : 0);
+
 	bcm4313_write_4(sc, BCM4313_D11_OBJADDR,
-	    BCM4313_OBJADDR_SHM_SEL | (offset >> 1));
-	return (bcm4313_read_2(sc, BCM4313_D11_OBJDATA));
+	    BCM4313_OBJADDR_SHM_SEL | (offset >> 2));
+	(void)bcm4313_read_4(sc, BCM4313_D11_OBJADDR);
+	return (bcm4313_read_2(sc, objoff));
 }
 
 void
 bcm4313_shm_write_2(struct bcm4313_softc *sc, uint16_t offset, uint16_t val)
 {
+	uint16_t objoff = BCM4313_D11_OBJDATA + ((offset & 2) ? 2 : 0);
+
 	bcm4313_write_4(sc, BCM4313_D11_OBJADDR,
-	    BCM4313_OBJADDR_SHM_SEL | (offset >> 1));
-	bcm4313_write_2(sc, BCM4313_D11_OBJDATA, val);
+	    BCM4313_OBJADDR_SHM_SEL | (offset >> 2));
+	(void)bcm4313_read_4(sc, BCM4313_D11_OBJADDR);
+	bcm4313_write_2(sc, objoff, val);
+	(void)bcm4313_read_2(sc, objoff);
 }
 
 /*
@@ -233,14 +233,15 @@ uint16_t
 bcm4313_phy_read(struct bcm4313_softc *sc, uint16_t addr)
 {
 	bcm4313_write_2(sc, BCM4313_D11_PHYREGADDR, addr);
+	(void)bcm4313_read_2(sc, BCM4313_D11_PHYREGADDR);
 	return (bcm4313_read_2(sc, BCM4313_D11_PHYREGDATA));
 }
 
 void
 bcm4313_phy_write(struct bcm4313_softc *sc, uint16_t addr, uint16_t val)
 {
-	bcm4313_write_2(sc, BCM4313_D11_PHYREGADDR, addr);
-	bcm4313_write_2(sc, BCM4313_D11_PHYREGDATA, val);
+	bcm4313_write_4(sc, BCM4313_D11_PHYREGADDR,
+	    addr | ((uint32_t)val << 16));
 }
 
 void
@@ -261,6 +262,7 @@ bcm4313_radio_read(struct bcm4313_softc *sc, uint16_t addr)
 	 */
 	bcm4313_write_2(sc, BCM4313_D11_RADIOADDR,
 	    addr | BCM4313_RADIO_2064_READ_OFF);
+	(void)bcm4313_read_2(sc, BCM4313_D11_RADIOADDR);
 	return (bcm4313_read_2(sc, BCM4313_D11_RADIODATA));
 }
 
@@ -268,6 +270,7 @@ void
 bcm4313_radio_write(struct bcm4313_softc *sc, uint16_t addr, uint16_t val)
 {
 	bcm4313_write_2(sc, BCM4313_D11_RADIOADDR, addr);
+	(void)bcm4313_read_2(sc, BCM4313_D11_RADIOADDR);
 	bcm4313_write_2(sc, BCM4313_D11_RADIODATA, val);
 }
 
@@ -290,8 +293,9 @@ bcm4313_radio_read32(struct bcm4313_softc *sc, uint16_t addr)
 	uint32_t val;
 
 	bcm4313_write_2(sc, BCM4313_D11_RADIOADDR, addr);
-	val = (uint32_t)bcm4313_read_2(sc, BCM4313_D11_RADIODATA) << 16;
-	val |= bcm4313_read_2(sc, BCM4313_D11_RADIODATA);
+	(void)bcm4313_read_2(sc, BCM4313_D11_RADIOADDR);
+	val = bcm4313_read_2(sc, BCM4313_D11_RADIODATA);
+	val |= (uint32_t)bcm4313_read_2(sc, BCM4313_D11_RADIODATA) << 16;
 	return (val);
 }
 
@@ -1641,12 +1645,23 @@ bcm4313_psm_start_locked(struct bcm4313_softc *sc)
 			bcm4313_shm_write_2(sc, BCM4313_M_HOST_FLAGS3, 0);
 			bcm4313_shm_write_2(sc, BCM4313_M_HOST_FLAGS4, 0);
 			bcm4313_shm_write_2(sc, BCM4313_M_HOST_FLAGS5, 0);
+			bcm4313_shm_write_2(sc, BCM4313_M_MBURST_SIZE, 8);
+			bcm4313_shm_write_2(sc, BCM4313_M_MAX_ANTCNT, 10);
 			bcm4313_shm_write_2(sc, BCM4313_M_MAXRXFRM_LEN, 2346);
 			bcm4313_shm_write_2(sc, BCM4313_M_DOT11_SLOT,
 			    (sc->sc_ic.ic_flags & IEEE80211_F_SHSLOT) ? 9 : 20);
 			bcm4313_shm_write_2(sc, BCM4313_M_CURCHANNEL,
 			    sc->sc_curchan);
 			bcm4313_set_macaddr(sc, sc->sc_ic.ic_macaddr);
+			if (sc->sc_debug >= 2)
+				device_printf(sc->sc_dev, "SHM maxrx %u slot %u "
+				    "channel %u\n",
+				    bcm4313_shm_read_2(sc,
+				    BCM4313_M_MAXRXFRM_LEN),
+				    bcm4313_shm_read_2(sc,
+				    BCM4313_M_DOT11_SLOT),
+				    bcm4313_shm_read_2(sc,
+				    BCM4313_M_CURCHANNEL));
 			return (0);
 		}
 		DELAY(10);
@@ -1804,13 +1819,11 @@ bcm4313_mac_suspend(struct bcm4313_softc *sc)
 static void
 bcm4313_set_bssid(struct bcm4313_softc *sc, const uint8_t *bssid)
 {
-	uint16_t ctl;
 	int i;
 
-	ctl = bcm4313_read_2(sc, BCM4313_D11_RCM_CTL);
-	ctl &= ~BCM4313_RCM_INDEX_MASK;
-	ctl |= BCM4313_RCM_BSSID_OFFSET | BCM4313_RCM_INC_DATA;
-	bcm4313_write_2(sc, BCM4313_D11_RCM_CTL, ctl);
+	bcm4313_write_2(sc, BCM4313_D11_RCM_CTL,
+	    BCM4313_RCM_BSSID_OFFSET | BCM4313_RCM_INC_DATA);
+	(void)bcm4313_read_2(sc, BCM4313_D11_RCM_CTL);
 	for (i = 0; i < 6; i += 2)
 		bcm4313_write_2(sc, BCM4313_D11_RCM_MAT_DATA,
 		    bssid[i] | (bssid[i + 1] << 8));
@@ -1820,13 +1833,11 @@ bcm4313_set_bssid(struct bcm4313_softc *sc, const uint8_t *bssid)
 static void
 bcm4313_set_macaddr(struct bcm4313_softc *sc, const uint8_t *mac)
 {
-	uint16_t ctl;
 	int i;
 
-	ctl = bcm4313_read_2(sc, BCM4313_D11_RCM_CTL);
-	ctl &= ~BCM4313_RCM_INDEX_MASK;
-	ctl |= BCM4313_RCM_MAC_OFFSET | BCM4313_RCM_INC_DATA;
-	bcm4313_write_2(sc, BCM4313_D11_RCM_CTL, ctl);
+	bcm4313_write_2(sc, BCM4313_D11_RCM_CTL,
+	    BCM4313_RCM_MAC_OFFSET | BCM4313_RCM_INC_DATA);
+	(void)bcm4313_read_2(sc, BCM4313_D11_RCM_CTL);
 	for (i = 0; i < 6; i += 2)
 		bcm4313_write_2(sc, BCM4313_D11_RCM_MAT_DATA,
 		    mac[i] | (mac[i + 1] << 8));
@@ -1919,9 +1930,13 @@ bcm4313_scan_end(struct ieee80211com *ic)
 		    bcm4313_intstatus_valid(bcm4313_read_4(sc,
 		    BCM4313_D11_MACCONTROL)))
 			device_printf(sc->sc_dev,
-			    "scan RX stats: badfcs %u badplcp %u "
-			    "beaconobss %u dataobss %u mcast %u ctl %u "
-			    "ovfl %u\n",
+			    "scan RX stats: txall %u toolong %u rxstart %u "
+			    "badfcs %u badplcp %u beaconobss %u dataobss %u "
+			    "mcast %u ctl %u ovfl %u\n",
+			    bcm4313_shm_read_2(sc,
+			    BCM4313_M_UCODE_MACSTAT_TXALLFRM),
+			    bcm4313_shm_read_2(sc, 0x0e0 + 0xa4),
+			    bcm4313_shm_read_2(sc, 0x0e0 + 0xb0),
 			    bcm4313_shm_read_2(sc, 0x0e0 + 0xaa),
 			    bcm4313_shm_read_2(sc, 0x0e0 + 0xac),
 			    bcm4313_shm_read_2(sc, 0x0e0 + 0xd2),

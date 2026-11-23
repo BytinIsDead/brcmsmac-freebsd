@@ -389,9 +389,10 @@ bcm4313_lcnphy_read_table(struct bcm4313_softc *sc, struct bcm4313_phytbl *pt)
 
 	for (idx = 0; idx < pt->tbl_len; idx++) {
 		if (pt->tbl_width == 32) {
-			p32[idx] = ((uint32_t)bcm4313_phy_read(sc,
-			    BCM4313_LCN_TBLDATAHI) << 16) |
-			    bcm4313_phy_read(sc, BCM4313_LCN_TBLDATALO);
+			uint32_t lo = bcm4313_phy_read(sc, BCM4313_LCN_TBLDATALO);
+			uint32_t hi = bcm4313_phy_read(sc, BCM4313_LCN_TBLDATAHI);
+
+			p32[idx] = lo | (hi << 16);
 		} else if (pt->tbl_width == 16) {
 			p16[idx] = bcm4313_phy_read(sc, BCM4313_LCN_TBLDATALO);
 		} else {
