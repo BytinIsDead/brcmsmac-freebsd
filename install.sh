@@ -87,10 +87,15 @@ fi
 # it (net80211 holds a reference).  So first destroy every wlan interface over
 # bcm4313*, then unload the old module, then load the new one.
 PCISEL=""
+PCIBUS=""
 if fb_kld_module_ok; then
     # Remember the PCI selector while our front-end is still attached, so the
     # card can be reset at the bus level after the unload (see below).
     PCISEL="$(fb_pci_selector)"
+    # Newbus name of the parent PCI bus (e.g. pci3).  The devname unit is NOT
+    # the PCI bus number: a card at pci0:6:0:0 can ride on bus device pci3,
+    # so "pci" + bus-number is wrong and devctl rescan fails with ENOENT.
+    PCIBUS="$(sysctl -n dev.bcm4313_pci.0.%parent 2>/dev/null)"
     fb_destroy_wlans_over 'bcm4313*'
     fb_note "unloading old if_bcm4313"
     kldunload if_bcm4313.ko || fb_kld_release || {
@@ -116,7 +121,7 @@ fi
 # The D11's DMP/DMA state survives kldunload: if a previous session crashed
 # the core ("BCMA_DMP_RESETSTATUS timeout"), the next driver just retries
 # resets against the same wedge.  A PCI-level reset clears the hardware.
-fb_pci_reset "$PCISEL"
+fb_pci_reset "$PCISEL" "$PCIBUS"
 
 # --- load --------------------------------------------------------------------
 # Prefer the kldinstall location, fall back to the tree's own .ko -- never
@@ -159,7 +164,10 @@ while [ "$attempt" -lt 2 ]; do
     # If the card is on the bus but stuck unclaimed, rescan its parent PCI
     # bus so newbus gets another shot at probing it.
     if [ -z "$WLDEV" ] && command -v devctl >/dev/null 2>&1; then
-        BUS="$(pciconf -l 2>/dev/null | awk -F'@' '/chip=0x472714e4/ {split($2, a, ":"); print "pci" a[2]; exit}')"
+        BUS="$PCIBUS"
+        if [ -z "$BUS" ]; then
+            BUS="$(pciconf -l 2>/dev/null | awk -F'@' '/chip=0x472714e4/ {split($2, a, ":"); print "pci" a[2]; exit}')"
+        fi
         if [ -n "$BUS" ]; then
             fb_note "devctl rescan $BUS (card visible but unclaimed)"
             devctl rescan "$BUS" 2>/dev/null || true

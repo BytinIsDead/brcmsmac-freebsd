@@ -198,8 +198,11 @@ fb_pci_selector() {
     pciconf -l 2>/dev/null | awk '/bcm4313_pci/{sub(/@.*/, "", $1); print $1; exit}'
 }
 
-# fb_pci_reset <selector>: best-effort PCI-level reset (clears wedged DMP/DMA
-# state that survives kldunload).  Needs FreeBSD 13+; silent if unavailable.
+# fb_pci_reset <selector> [busdev]: best-effort PCI-level reset (clears wedged
+# DMP/DMA state that survives kldunload).  Needs FreeBSD 13+; silent if
+# unavailable.  A successful reset deletes the device from newbus, so rescan
+# its parent bus (devname, e.g. pci3 -- NOT "pci"+bus-number) afterwards or
+# the freshly loaded module has nothing to claim.
 fb_pci_reset() {
     [ -n "$1" ] || return 0
     command -v devctl >/dev/null 2>&1 || {
@@ -207,7 +210,13 @@ fb_pci_reset() {
         return 0
     }
     fb_note "PCI reset of $1 (clears stale DMP/DMA state)"
-    devctl reset "$1" 2>/dev/null ||
+    if devctl reset "$1" 2>/dev/null; then
+        if [ -n "${2:-}" ]; then
+            devctl rescan "$2" 2>/dev/null || true
+            sleep 1
+        fi
+    else
         fb_warn "devctl reset failed -- a reboot clears the same state"
+    fi
     sleep 1
 }

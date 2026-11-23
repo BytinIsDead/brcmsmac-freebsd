@@ -16,8 +16,8 @@
  *	read_phy_reg(pi, a)	-> bcm4313_phy_read(sc, a)
  *	write_phy_reg(pi, a, v)	-> bcm4313_phy_write(sc, a, v)
  *	mod_phy_reg(pi, a, m, v) -> bcm4313_phy_maskset(sc, a, m, v)
- *	and_phy_reg(pi, a, v)	-> bcm4313_phy_maskset(sc, a, v, 0)
- *	or_phy_reg(pi, a, v)	-> bcm4313_phy_maskset(sc, a, 0xffff, v)
+ *	and_phy_reg(pi, a, v)	-> bcm4313_phy_maskset(sc, a, ~v, 0)
+ *	or_phy_reg(pi, a, v)	-> bcm4313_phy_maskset(sc, a, v, v)
  *	read/write_radio_reg()	-> bcm4313_radio_read/write()
  *	mod/and/or_radio_reg()	-> bcm4313_radio_maskset()
  *	udelay()/mdelay()	-> DELAY()
@@ -65,7 +65,12 @@ void bcm4313_lcnphy_set_chanspec(struct bcm4313_softc *, uint8_t);
 
 #define	BCM4313_LCNREV_IS(rev, r)	((rev) == (r))
 #define	BCM4313_LCN_PHY_TXC_ANT_0	0x0040	/* PHY_TXC_ANT_0 (phy_int.h) */
-#define	BCM4313_LCN_PMU_CTL_PLL_UPD	0x00000004 /* BCMA_CC_PMU_CTL bit 2 */
+/*
+ * BCMA_CC_PMU_CTL_PLL_UPD is bit 10 (0x400).  Bit 2 (0x4) is the LSB of
+ * the PMU crystal-frequency field: pulsing it re-clocks the whole chip
+ * (wifi + bluetooth) from a wrong xtal reference and wedges the core.
+ */
+#define	BCM4313_LCN_PMU_CTL_PLL_UPD	0x00000400
 
 /* wlc_lcnphy_iqcal_active() (phy_lcn.c). */
 #define	BCM4313_LCNPHY_IQCAL_ACTIVE(sc)	\
@@ -163,31 +168,6 @@ bcm4313_cordic(int theta)
  * ---------------------------------------------------------------------------
  */
 
-/*
- * MAC suspend with wait-for-MACSSPNDD, mirroring
- * brcms_c_ucode_mac_suspend() (main.c).
- */
-static void
-bcm4313_lcnphy_suspend(struct bcm4313_softc *sc)
-{
-	uint32_t mc, is;
-	int i;
-
-	mc = bcm4313_read_4(sc, BCM4313_D11_MACCONTROL);
-	mc &= ~BCM4313_MCTL_EN_MAC;
-	bcm4313_write_4(sc, BCM4313_D11_MACCONTROL, mc);
-	(void)bcm4313_read_4(sc, BCM4313_D11_MACCONTROL);
-
-	for (i = 0; i < 10000; i++) {
-		is = bcm4313_read_4(sc, BCM4313_D11_MACINTSTATUS);
-		if (is & BCM4313_MI_MACSSPNDD)
-			break;
-		DELAY(1);
-	}
-	/* Clear the suspend-done interrupt. */
-	bcm4313_write_4(sc, BCM4313_D11_MACINTSTATUS, BCM4313_MI_MACSSPNDD);
-}
-
 /* wlapi_enable_mac() -- bcm4313_mac_enable() in if_bcm4313.c. */
 
 /*
@@ -272,10 +252,17 @@ bcm4313_lcnphy_regctl_maskset(struct bcm4313_softc *sc, uint32_t reg,
 static void
 bcm4313_lcnphy_pll_upd(struct bcm4313_softc *sc)
 {
+	uint32_t before, after;
+
 	if (sc->sc_cc_res == NULL)
 		return;
+	before = bhnd_bus_read_4(sc->sc_cc_res, 0x600);
 	bhnd_bus_write_4(sc->sc_cc_res, 0x600,
-	    bhnd_bus_read_4(sc->sc_cc_res, 0x600) | BCM4313_LCN_PMU_CTL_PLL_UPD);
+	    before | BCM4313_LCN_PMU_CTL_PLL_UPD);
+	after = bhnd_bus_read_4(sc->sc_cc_res, 0x600);
+	device_printf(sc->sc_dev, "TRACE pll_upd PMU_CTL %08x -> %08x\n",
+	    before, after);
+	bcm4313_trace(sc, "chan:pll_upd");
 }
 
 /* brcms_b_write_template_ram() (main.c). */
@@ -503,8 +490,8 @@ bcm4313_lcnphy_set_tx_gain_override(struct bcm4313_softc *sc, bool b_enable)
 {
 	uint16_t ebit = b_enable ? 1 : 0;
 
-	bcm4313_phy_maskset(sc, 0x4b0, (0x1 << 8), ebit << 8);
-
+	bcm4313_phy_maskset(sc, 0x4b0, (0x1 << 7), ebit << 7);
+	bcm4313_phy_maskset(sc, 0x4b0, (0x1 << 14), ebit << 14);
 	bcm4313_phy_maskset(sc, 0x43b, (0x1 << 6), ebit << 6);
 }
 
@@ -520,15 +507,16 @@ bcm4313_lcnphy_set_tx_gain_override(struct bcm4313_softc *sc, bool b_enable)
 static void
 bcm4313_lcnphy_set_trsw_override(struct bcm4313_softc *sc, bool tx, bool rx)
 {
-	bcm4313_phy_maskset(sc, 0x4b0, (0x1 << 7), (tx ? 1 : 0) << 7);
-	bcm4313_phy_maskset(sc, 0x4b0, (0x1 << 6), (rx ? 1 : 0) << 6);
-	bcm4313_phy_maskset(sc, 0x4b0, (0x1 << 5), (rx ? 1 : 0) << 5);
+	bcm4313_phy_maskset(sc, 0x44d, (0x1 << 1) | (0x1 << 0),
+	    (tx ? (0x1 << 1) : 0) | (rx ? (0x1 << 0) : 0));
+	bcm4313_phy_maskset(sc, 0x44c, (0x1 << 1) | (0x1 << 0),
+	    (0x1 << 1) | (0x1 << 0));
 }
 
 static void
 bcm4313_lcnphy_clear_trsw_override(struct bcm4313_softc *sc)
 {
-	bcm4313_lcnphy_set_trsw_override(sc, false, false);
+	bcm4313_phy_maskset(sc, 0x44c, (0x1 << 1) | (0x1 << 0), 0);
 }
 
 /* wlc_lcnphy_rx_gain_override_enable(). */
@@ -567,7 +555,6 @@ bcm4313_lcnphy_set_rx_gain_by_distribution(struct bcm4313_softc *sc,
 {
 	uint16_t gain0_15, gain16_19;
 
-	(void)trsw;
 	gain16_19 = biq2 & 0xf;
 	gain0_15 = ((biq1 & 0xf) << 12) |
 	    ((tia & 0xf) << 8) |
@@ -588,6 +575,8 @@ bcm4313_lcnphy_set_rx_gain_by_distribution(struct bcm4313_softc *sc,
 		bcm4313_phy_maskset(sc, 0x4b1, (0x1 << 15), 0 << 15);
 		bcm4313_phy_maskset(sc, 0x4b1, (0x1 << 9), ext_lna << 9);
 	}
+
+	bcm4313_phy_maskset(sc, 0x44d, (0x1 << 0), (!trsw) << 0);
 }
 
 /* struct lcnphy_txgains (phy_lcn.h). */
@@ -1831,36 +1820,29 @@ bcm4313_lcnphy_set_chanspec_tweaks(struct bcm4313_softc *sc, uint8_t channel)
 	if (channel == 1)
 		lcn->lcnphy_bandedge_corr = 4;
 
-	if (channel == 1 || channel == 2 || channel == 3 ||
-	    channel == 4 || channel == 9 ||
-	    channel == 10 || channel == 11 || channel == 12) {
-		bcm4313_lcnphy_pll_write(sc, 0x2, 0x03000c04);
-		bcm4313_lcnphy_pll_maskset(sc, 0x3, ~0x00ffffff, 0x0);
-		bcm4313_lcnphy_pll_write(sc, 0x4, 0x200005c0);
+	/*
+	 * Spur avoidance is disabled on BCM4313.  Upstream selects a spur PLL
+	 * (channels 5-8/13) and latches it via the chipc PMU_CTL PLL_UPD bit;
+	 * bhnd's spur-avoidance PLL update has no BCM4313 case (ENODEV) and the
+	 * raw latch is not reachable through a public bhnd API, so the spur PLL
+	 * can never take effect.  Running the MAC at the spur-mode clock against
+	 * the unlatched default PLL collapses the shared analog rail.  Always
+	 * use the non-spur PLL/clock configuration (the safe path the PHY init
+	 * channel set already uses).
+	 */
+	bcm4313_lcnphy_pll_write(sc, 0x2, 0x03000c04);
+	bcm4313_lcnphy_pll_maskset(sc, 0x3, ~0x00ffffff, 0x0);
+	bcm4313_lcnphy_pll_write(sc, 0x4, 0x200005c0);
 
-		bcm4313_lcnphy_pll_upd(sc);
-		bcm4313_phy_write(sc, 0x942, 0);
-		bcm4313_lcnphy_txrx_spur_avoidance_mode(sc, false);
-		lcn->lcnphy_spurmod = false;
-		bcm4313_phy_maskset(sc, 0x424, (0xff << 8), (0x1b) << 8);
+	bcm4313_lcnphy_pll_upd(sc);
+	bcm4313_phy_write(sc, 0x942, 0);
+	bcm4313_lcnphy_txrx_spur_avoidance_mode(sc, false);
+	lcn->lcnphy_spurmod = false;
+	bcm4313_phy_maskset(sc, 0x424, (0xff << 8), (0x1b) << 8);
 
-		bcm4313_phy_write(sc, 0x425, 0x5907);
-	} else {
-		bcm4313_lcnphy_pll_write(sc, 0x2, 0x03140c04);
-		bcm4313_lcnphy_pll_maskset(sc, 0x3, ~0x00ffffff, 0x333333);
-		bcm4313_lcnphy_pll_write(sc, 0x4, 0x202c2820);
+	bcm4313_phy_write(sc, 0x425, 0x5907);
 
-		bcm4313_lcnphy_pll_upd(sc);
-		bcm4313_phy_write(sc, 0x942, 0);
-		bcm4313_lcnphy_txrx_spur_avoidance_mode(sc, true);
-
-		lcn->lcnphy_spurmod = false;
-		bcm4313_phy_maskset(sc, 0x424, (0xff << 8), (0x1f) << 8);
-
-		bcm4313_phy_write(sc, 0x425, 0x590a);
-	}
-
-	bcm4313_phy_maskset(sc, 0x44a, 0xffff, 0x44);
+	bcm4313_phy_maskset(sc, 0x44a, 0x44, 0x44);
 	bcm4313_phy_write(sc, 0x44a, 0x80);
 }
 
@@ -2866,7 +2848,7 @@ bcm4313_lcnphy_stop_tx_tone(struct bcm4313_softc *sc)
 
 	bcm4313_phy_maskset(sc, 0x6da, (0x1 << 7), 0 << 7);
 
-	bcm4313_radio_maskset(sc, 0x112, 0xfff9, 0);
+	bcm4313_radio_maskset(sc, 0x112, 0x6, 0);
 
 	bcm4313_lcnphy_deaf_mode(sc, false);
 }
@@ -3285,8 +3267,8 @@ bcm4313_lcnphy_idle_tssi_est(struct bcm4313_softc *sc)
 	(void)bcm4313_phy_read(sc, 0x4ab); /* idleTssi */
 	suspend = (0 == (bcm4313_read_4(sc, BCM4313_D11_MACCONTROL) &
 	    BCM4313_MCTL_EN_MAC));
-	if (!suspend)
-		bcm4313_lcnphy_suspend(sc);
+	if (!suspend && bcm4313_mac_suspend(sc) != 0)
+		return;
 	bcm4313_lcnphy_set_tx_pwr_ctrl(sc, BCM4313_LCN_TX_PWR_CTRL_OFF);
 
 	tx_gain_override_old = BCM4313_LCN_TX_GAIN_OVERRIDE_ENABLED(sc);
@@ -3369,8 +3351,8 @@ bcm4313_lcnphy_vbat_temp_sense_setup(struct bcm4313_softc *sc, uint8_t mode)
 		values_to_save[i] = bcm4313_phy_read(sc, tempsense_phy_regs[i]);
 	suspend = (0 == (bcm4313_read_4(sc, BCM4313_D11_MACCONTROL) &
 	    BCM4313_MCTL_EN_MAC));
-	if (!suspend)
-		bcm4313_lcnphy_suspend(sc);
+	if (!suspend && bcm4313_mac_suspend(sc) != 0)
+		return;
 	save_txpwrCtrlEn = bcm4313_radio_read(sc, 0x4a4);
 
 	bcm4313_lcnphy_set_tx_pwr_ctrl(sc, BCM4313_LCN_TX_PWR_CTRL_OFF);
@@ -3497,8 +3479,8 @@ bcm4313_lcnphy_tx_pwr_ctrl_init(struct bcm4313_softc *sc)
 
 	suspend = (0 == (bcm4313_read_4(sc, BCM4313_D11_MACCONTROL) &
 	    BCM4313_MCTL_EN_MAC));
-	if (!suspend)
-		bcm4313_lcnphy_suspend(sc);
+	if (!suspend && bcm4313_mac_suspend(sc) != 0)
+		return;
 
 	if (!sc->sc_hwpwrctrl_capable) {
 		/* 4313 is 2.4GHz-only. */
@@ -3593,8 +3575,8 @@ bcm4313_lcnphy_tempsense(struct bcm4313_softc *sc, bool mode)
 	if (mode == 1) {
 		suspend = (0 == (bcm4313_read_4(sc, BCM4313_D11_MACCONTROL) &
 		    BCM4313_MCTL_EN_MAC));
-		if (!suspend)
-			bcm4313_lcnphy_suspend(sc);
+		if (!suspend && bcm4313_mac_suspend(sc) != 0)
+			return (0);
 		bcm4313_lcnphy_vbat_temp_sense_setup(sc, BCM4313_LCN_TEMPSENSE_MODE);
 	}
 	tempsenseval1 = bcm4313_phy_read(sc, 0x476) & 0x1ff;
@@ -3670,8 +3652,8 @@ bcm4313_lcnphy_glacial_timer_based_cal(struct bcm4313_softc *sc)
 
 	suspend = (0 == (bcm4313_read_4(sc, BCM4313_D11_MACCONTROL) &
 	    BCM4313_MCTL_EN_MAC));
-	if (!suspend)
-		bcm4313_lcnphy_suspend(sc);
+	if (!suspend && bcm4313_mac_suspend(sc) != 0)
+		return;
 	bcm4313_lcnphy_deaf_mode(sc, true);
 	/* Re-arm the periodic recalibration loop (upstream:
 	 * pi->phy_lastcal = pi->sh->now). */
@@ -3709,7 +3691,8 @@ bcm4313_lcnphy_periodic_cal(struct bcm4313_softc *sc)
 	    BCM4313_MCTL_EN_MAC));
 	if (!suspend) {
 		bcm4313_shm_write_2(sc, BCM4313_M_CTS_DURATION, 10000);
-		bcm4313_lcnphy_suspend(sc);
+		if (bcm4313_mac_suspend(sc) != 0)
+			return;
 	}
 
 	bcm4313_lcnphy_deaf_mode(sc, true);
@@ -3990,25 +3973,63 @@ static void
 bcm4313_lcnphy_rcal(struct bcm4313_softc *sc)
 {
 	uint8_t rcal_value;
+	uint16_t r;
+	static int skip_rcal = -1;
 
-	bcm4313_radio_maskset(sc, 0x05b, 0xffff, bcm4313_radio_read(sc, 0x05b) & 0xfd);
+	if (skip_rcal < 0) {
+		skip_rcal = 0;
+		TUNABLE_INT_FETCH("hw.bcm4313.skip_rcal", &skip_rcal);
+	}
+	if (skip_rcal) {
+		device_printf(sc->sc_dev, "rcal skipped (hw.bcm4313.skip_rcal)\n");
+		return;
+	}
 
-	bcm4313_radio_maskset(sc, 0x004, 0xffff, bcm4313_radio_read(sc, 0x004) | 0x40);
-	bcm4313_radio_maskset(sc, 0x120, 0xffff, bcm4313_radio_read(sc, 0x120) | 0x10);
+	r = bcm4313_radio_read(sc, 0x05b);
+	device_printf(sc->sc_dev, "TRACE rcal rd05b=%04x\n", r);
+	bcm4313_radio_maskset(sc, 0x05b, 0xffff, r & 0xfd);
+	bcm4313_trace(sc, "rcal:1");
 
-	bcm4313_radio_maskset(sc, 0x078, 0xffff, bcm4313_radio_read(sc, 0x078) | 0x80);
-	bcm4313_radio_maskset(sc, 0x129, 0xffff, bcm4313_radio_read(sc, 0x129) | 0x02);
+	r = bcm4313_radio_read(sc, 0x004);
+	device_printf(sc->sc_dev, "TRACE rcal rd004=%04x\n", r);
+	bcm4313_radio_maskset(sc, 0x004, 0xffff, r | 0x40);
+	bcm4313_trace(sc, "rcal:2");
+	r = bcm4313_radio_read(sc, 0x120);
+	device_printf(sc->sc_dev, "TRACE rcal rd120=%04x\n", r);
+	bcm4313_radio_maskset(sc, 0x120, 0xffff, r | 0x10);
+	bcm4313_trace(sc, "rcal:3");
 
-	bcm4313_radio_maskset(sc, 0x057, 0xffff, bcm4313_radio_read(sc, 0x057) | 0x01);
+	r = bcm4313_radio_read(sc, 0x078);
+	device_printf(sc->sc_dev, "TRACE rcal rd078=%04x\n", r);
+	bcm4313_radio_maskset(sc, 0x078, 0xffff, r | 0x80);
+	bcm4313_trace(sc, "rcal:4");
+	r = bcm4313_radio_read(sc, 0x129);
+	device_printf(sc->sc_dev, "TRACE rcal rd129=%04x\n", r);
+	bcm4313_radio_maskset(sc, 0x129, 0xffff, r | 0x02);
+	bcm4313_trace(sc, "rcal:5");
+
+	r = bcm4313_radio_read(sc, 0x057);
+	device_printf(sc->sc_dev, "TRACE rcal rd057=%04x\n", r);
+	bcm4313_radio_maskset(sc, 0x057, 0xffff, r | 0x01);
+	bcm4313_trace(sc, "rcal:6");
 
 	bcm4313_radio_maskset(sc, 0x05b, 0xffff, bcm4313_radio_read(sc, 0x05b) | 0x02);
+	bcm4313_trace(sc, "rcal:7");
+	device_printf(sc->sc_dev, "TRACE rcal-start clk_ctl_st=%08x\n",
+	    bcm4313_read_4(sc, BCM4313_D11_CLK_CTL_ST));
 	DELAY(5000);
+	bcm4313_trace(sc, "rcal:delay");
 	/* SPINWAIT(!wlc_radio_2064_rcal_done, 10s) with a bounded wait. */
 	{
-		int spin = 0;
-		while (!(bcm4313_radio_read(sc, 0x05c) & 0x20) && spin < 1000000)
-			spin++;
+		int us = 0;
+		while (!(bcm4313_radio_read(sc, 0x05c) & 0x20) && us < 10000000) {
+			us++;
+			DELAY(1);
+		}
+		device_printf(sc->sc_dev, "TRACE rcal wait=%dus rd05c=%04x\n",
+		    us, bcm4313_radio_read(sc, 0x05c));
 	}
+	bcm4313_trace(sc, "rcal:spin");
 
 	if (bcm4313_radio_read(sc, 0x05c) & 0x20) {
 		rcal_value = (uint8_t)bcm4313_radio_read(sc, 0x05c);
@@ -4018,6 +4039,7 @@ bcm4313_lcnphy_rcal(struct bcm4313_softc *sc)
 	bcm4313_radio_maskset(sc, 0x05b, 0xffff, bcm4313_radio_read(sc, 0x05b) & 0xfd);
 
 	bcm4313_radio_maskset(sc, 0x057, 0xffff, bcm4313_radio_read(sc, 0x057) & 0xfe);
+	bcm4313_trace(sc, "rcal:end");
 }
 
 /* wlc_lcnphy_rc_cal(). */
@@ -4048,14 +4070,16 @@ bcm4313_radio_2064_init(struct bcm4313_softc *sc)
 
 	lcnphyregs = lcnphy_radio_regs_2064;
 
+	bcm4313_trace(sc, "r2064:pre-loop");
 	for (i = 0; lcnphyregs[i].address != 0xffff; i++) {
-		/* 4313 is 2.4GHz-only (do_init_a branch dropped). */
+		/* 4313 is 2.4GHz-only (do_init_a branch dropped).
+		 * RADIO_DEFAULT_CORE is 0 (phy_radio.h). */
 		if (lcnphyregs[i].do_init_g)
 			bcm4313_radio_write(sc,
-			    (uint8_t)((lcnphyregs[i].address & 0x3fff) |
-			    0x100),
+			    (uint16_t)(lcnphyregs[i].address & 0x3fff),
 			    (uint16_t)lcnphyregs[i].init_g);
 	}
+	bcm4313_trace(sc, "r2064:loop");
 
 	bcm4313_radio_write(sc, 0x032, 0x62);
 	bcm4313_radio_write(sc, 0x033, 0x19);
@@ -4072,6 +4096,7 @@ bcm4313_radio_2064_init(struct bcm4313_softc *sc)
 
 	bcm4313_radio_write(sc, 0x01d, 0x02);
 	bcm4313_radio_write(sc, 0x01e, 0x06);
+	bcm4313_trace(sc, "r2064:fixed");
 
 	bcm4313_phy_maskset(sc, 0x4ea, (0x7 << 0), 0 << 0);
 
@@ -4093,18 +4118,23 @@ bcm4313_radio_2064_init(struct bcm4313_softc *sc)
 	bcm4313_phy_maskset(sc, 0x4eb, (0x7 << 6), 0 << 6);
 
 	bcm4313_phy_maskset(sc, 0x46a, (0xffff << 0), 25 << 0);
+	bcm4313_trace(sc, "r2064:4ea");
 
 	bcm4313_lcnphy_set_tx_locc(sc, 0);
+	bcm4313_trace(sc, "r2064:locc");
 
 	bcm4313_lcnphy_rcal(sc);
+	bcm4313_trace(sc, "r2064:rcal");
 
 	bcm4313_lcnphy_rc_cal(sc);
+	bcm4313_trace(sc, "r2064:rccal");
 
 	if (!(sc->sc_board.board_flags & BCM4313_BFL_FEM)) {
 		bcm4313_radio_write(sc, 0x032, 0x6f);
 		bcm4313_radio_write(sc, 0x033, 0x19);
 		bcm4313_radio_write(sc, 0x039, 0xe);
 	}
+	bcm4313_trace(sc, "r2064:done");
 }
 
 /* wlc_lcnphy_radio_init(). */
@@ -4285,6 +4315,84 @@ bcm4313_lcnphy_baseband_init(struct bcm4313_softc *sc)
 	bcm4313_lcnphy_bu_tweaks(sc);
 }
 
+/*
+ * Power up the analog core and radio before any calibration.  Upstream does
+ * this in the wlc_phy_init() wrapper (phy_cmn.c) ahead of wlc_phy_init_lcnphy();
+ * running RC cal against a powered-down analog core collapses the shared
+ * chipc/PMU rail and takes the whole combo chip (wifi + bluetooth) down.
+ */
+static void
+bcm4313_lcnphy_anacore_on(struct bcm4313_softc *sc)
+{
+	/* wlc_phy_anacore(ON), LCN: clear PHY 0x43b bits 0-2. */
+	bcm4313_phy_maskset(sc, 0x43b, 0x7, 0);
+}
+
+static void
+bcm4313_lcnphy_switch_radio_on(struct bcm4313_softc *sc)
+{
+	/* wlc_phy_switch_radio(ON), LCN. */
+	bcm4313_phy_maskset(sc, 0x44c, 0x1f00, 0);
+	bcm4313_phy_maskset(sc, 0x4b0, 0x808, 0);
+	bcm4313_phy_maskset(sc, 0x4f9, 0x8, 0);
+}
+
+void
+bcm4313_lcnphy_off(struct bcm4313_softc *sc)
+{
+	(void)bcm4313_read_4(sc, BCM4313_D11_MACCONTROL);
+	bcm4313_phy_maskset(sc, 0x44d, 0x7c00, 0);
+	bcm4313_phy_maskset(sc, 0x44c, 0x1f00, 0x1f00);
+	bcm4313_phy_maskset(sc, 0x4b7, 0x7f00, 0);
+	bcm4313_phy_maskset(sc, 0x4b1, 0x2000, 0);
+	bcm4313_phy_maskset(sc, 0x4b0, 0x808, 0x808);
+	bcm4313_phy_maskset(sc, 0x4fa, 0x8, 0);
+	bcm4313_phy_maskset(sc, 0x4f9, 0x8, 0x8);
+	bcm4313_phy_maskset(sc, 0x43c, 0x7, 0x7);
+	bcm4313_phy_maskset(sc, 0x43b, 0x7, 0x7);
+}
+
+/* wlc_phy_txpower_update_shm(). */
+static void
+bcm4313_lcnphy_txpower_update_shm(struct bcm4313_softc *sc)
+{
+	static const uint8_t ofdm_plcp_rates[] = {
+		0xb, 0xf, 0xa, 0xe, 0x9, 0xd, 0x8, 0xc
+	};
+	uint16_t offset;
+	int8_t txpwr_offset;
+	int i;
+
+	if (sc->sc_hwpwrctrl_capable) {
+		bcm4313_shm_write_2(sc, BCM4313_M_TXPWR_MAX, 63);
+		bcm4313_shm_write_2(sc, BCM4313_M_TXPWR_N,
+		    1 << BCM4313_NUM_TSSI_FRAMES);
+		bcm4313_shm_write_2(sc, BCM4313_M_TXPWR_TARGET,
+		    sc->sc_tx_power_min << BCM4313_NUM_TSSI_FRAMES);
+		bcm4313_shm_write_2(sc, BCM4313_M_TXPWR_CUR,
+		    sc->sc_lcn.hwpwr_txcur);
+
+		for (i = 0; i < nitems(ofdm_plcp_rates); i++) {
+			offset = 2 * bcm4313_shm_read_2(sc,
+			    BCM4313_M_RT_DIRMAP_A + ofdm_plcp_rates[i] * 2);
+			txpwr_offset =
+			    sc->sc_lcn.tx_power_offset[BCM4313_TXP_FIRST_OFDM + i];
+			bcm4313_shm_write_2(sc, offset + 6, txpwr_offset);
+			bcm4313_shm_write_2(sc, offset + 14, -(txpwr_offset / 2));
+		}
+
+		bcm4313_shm_write_2(sc, BCM4313_M_HOST_FLAGS2,
+		    bcm4313_shm_read_2(sc, BCM4313_M_HOST_FLAGS2) |
+		    BCM4313_MHF2_HWPWRCTL);
+	} else {
+		for (i = BCM4313_TXP_FIRST_OFDM; i <= BCM4313_TXP_LAST_OFDM; i++)
+			sc->sc_lcn.tx_power_offset[i] = (uint8_t)
+			    ((sc->sc_lcn.tx_power_offset[i] + 7) / 8 * 8);
+		bcm4313_shm_write_2(sc, BCM4313_M_OFDM_OFFSET,
+		    (sc->sc_lcn.tx_power_offset[BCM4313_TXP_FIRST_OFDM] + 7) >> 3);
+	}
+}
+
 /* wlc_phy_init_lcnphy(). */
 void
 bcm4313_lcnphy_init(struct bcm4313_softc *sc)
@@ -4294,8 +4402,12 @@ bcm4313_lcnphy_init(struct bcm4313_softc *sc)
 	lcn->lcnphy_cal_counter = 0;
 	lcn->lcnphy_cal_temper = lcn->lcnphy_rawtempsense;
 
+	bcm4313_lcnphy_anacore_on(sc);
+	bcm4313_lcnphy_switch_radio_on(sc);
+	bcm4313_trace(sc, "phy:anacore");
+
 	bcm4313_phy_maskset(sc, 0x44a, 0xffff, bcm4313_phy_read(sc, 0x44a) | 0x80);
-	bcm4313_phy_maskset(sc, 0x44a, 0x7f, 0);
+	bcm4313_phy_maskset(sc, 0x44a, 0x80, 0);
 
 	bcm4313_lcnphy_afe_clk_init(sc, BCM4313_LCN_AFE_CLK_INIT_MODE_TXRX2X);
 
@@ -4304,17 +4416,23 @@ bcm4313_lcnphy_init(struct bcm4313_softc *sc)
 	bcm4313_phy_write(sc, 0x46a, 25);
 
 	bcm4313_lcnphy_baseband_init(sc);
+	bcm4313_trace(sc, "phy:bb");
 
 	bcm4313_lcnphy_radio_init(sc);
+	bcm4313_trace(sc, "phy:radio");
 
 	/* 4313 is 2.4GHz-only. */
 	bcm4313_lcnphy_tx_pwr_ctrl_init(sc);
+	bcm4313_trace(sc, "phy:pwr");
 
 	bcm4313_lcnphy_set_chanspec(sc, sc->sc_curchan);
+	bcm4313_trace(sc, "phy:chanspec");
 
 	bcm4313_lcnphy_regctl_maskset(sc, 0, ~0xf, 0x9);
+	bcm4313_trace(sc, "phy:regctl");
 
 	bcm4313_lcnphy_chipctl_maskset(sc, 0, 0x0, 0x03cddddd);
+	bcm4313_trace(sc, "phy:chipctl");
 
 	if ((sc->sc_board.board_flags & BCM4313_BFL_FEM) &&
 	    sc->sc_temppwrctrl_capable)
@@ -4332,21 +4450,32 @@ bcm4313_lcnphy_init(struct bcm4313_softc *sc)
 	bcm4313_lcnphy_set_tx_pwr_ctrl(sc, BCM4313_LCN_TX_PWR_CTRL_HW);
 	lcn->lcnphy_noise_samples = BCM4313_LCN_NOISE_SAMPLES_DEFAULT;
 	bcm4313_lcnphy_calib_modes(sc, BCM4313_LCNPHY_PERICAL_PHYINIT);
+	bcm4313_lcnphy_txpower_update_shm(sc);
+
+	/* wlc_phy_ant_rxdiv_set(): the port defaults to main antenna 0. */
+	bcm4313_phy_maskset(sc, 0x410, 0x3, 0);
+	bcm4313_shm_write_2(sc, BCM4313_M_HOST_FLAGS1,
+	    bcm4313_shm_read_2(sc, BCM4313_M_HOST_FLAGS1) &
+	    ~BCM4313_MHF1_ANTDIV);
 }
 
 /* wlc_phy_chanspec_set_lcnphy(). */
 void
 bcm4313_lcnphy_set_chanspec(struct bcm4313_softc *sc, uint8_t channel)
 {
+	bcm4313_trace(sc, "chan:tweaks-pre");
 	bcm4313_lcnphy_set_chanspec_tweaks(sc, channel);
+	bcm4313_trace(sc, "chan:tweaks-post");
 
 	bcm4313_phy_maskset(sc, 0x44a, 0xffff, bcm4313_phy_read(sc, 0x44a) | 0x44);
 	bcm4313_phy_write(sc, 0x44a, 0x80);
 
 	bcm4313_lcnphy_radio_2064_channel_tune_4313(sc, channel);
 	DELAY(1000);
+	bcm4313_trace(sc, "chan:tune");
 
 	bcm4313_lcnphy_toggle_afe_pwdn(sc);
+	bcm4313_trace(sc, "chan:afe");
 
 	bcm4313_phy_write(sc, 0x657, lcnphy_sfo_cfg[channel - 1].ptcentreTs20);
 	bcm4313_phy_write(sc, 0x658, lcnphy_sfo_cfg[channel - 1].ptcentreFactor);
@@ -4369,6 +4498,7 @@ bcm4313_lcnphy_set_chanspec(struct bcm4313_softc *sc, uint8_t channel)
 	bcm4313_phy_maskset(sc, 0x4eb, (0x7 << 3), (1) << 3);
 	if (sc->sc_hwpwrctrl_capable)
 		bcm4313_lcnphy_tssi_setup(sc);
+	bcm4313_trace(sc, "chan:done");
 }
 
 /* wlc_phy_txpwr_srom_read_lcnphy() -- SPROM-derived TX power limits.

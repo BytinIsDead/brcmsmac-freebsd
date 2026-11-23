@@ -163,6 +163,16 @@ bcm4313_write_4(struct bcm4313_softc *sc, uint16_t reg, uint32_t val)
 	bus_write_4(sc->sc_mem_res, reg, val);
 }
 
+/* TEMP: scan-death instrumentation -- remove once the killer write is found. */
+void
+bcm4313_trace(struct bcm4313_softc *sc, const char *stage)
+{
+	uint32_t v = bcm4313_read_4(sc, BCM4313_D11_MACCONTROL);
+
+	device_printf(sc->sc_dev, "TRACE %s macctl=%08x%s\n", stage, v,
+	    v == 0xffffffff ? " [DEAD]" : "");
+}
+
 uint16_t
 bcm4313_read_2(struct bcm4313_softc *sc, uint16_t reg)
 {
@@ -238,13 +248,19 @@ bcm4313_phy_maskset(struct bcm4313_softc *sc, uint16_t addr, uint16_t mask,
     uint16_t set)
 {
 	bcm4313_phy_write(sc, addr,
-	    (bcm4313_phy_read(sc, addr) & mask) | set);
+	    (bcm4313_phy_read(sc, addr) & ~mask) | (set & mask));
 }
 
 uint16_t
 bcm4313_radio_read(struct bcm4313_softc *sc, uint16_t addr)
 {
-	bcm4313_write_2(sc, BCM4313_D11_RADIOADDR, addr);
+	/*
+	 * 2064 reads live at addr | RADIO_2064_READ_OFF (phy_radio.h);
+	 * without the offset the read returns garbage and every
+	 * read-modify-write trashes live radio control registers.
+	 */
+	bcm4313_write_2(sc, BCM4313_D11_RADIOADDR,
+	    addr | BCM4313_RADIO_2064_READ_OFF);
 	return (bcm4313_read_2(sc, BCM4313_D11_RADIODATA));
 }
 
@@ -260,7 +276,7 @@ bcm4313_radio_maskset(struct bcm4313_softc *sc, uint16_t addr, uint16_t mask,
     uint16_t set)
 {
 	bcm4313_radio_write(sc, addr,
-	    (bcm4313_radio_read(sc, addr) & mask) | set);
+	    (bcm4313_radio_read(sc, addr) & ~mask) | (set & mask));
 }
 
 /*
@@ -647,6 +663,9 @@ bcm4313_rx_refill(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 			sc->sc_rxnobuf++;
 			break;
 		}
+		/* m_getjcl() leaves m_len zero; DMA maps the mbuf length. */
+		m->m_pkthdr.len = m->m_len = ring->r_bufsz;
+		bzero(mtod(m, void *), BCM4313_HWRXOFF);
 		if ((error = bus_dmamap_load_mbuf(sc->sc_bufdtag,
 		    slot->s_dmap, m, bcm4313_dma_addr_cb2, &pa,
 		    BUS_DMA_NOWAIT)) != 0) {
@@ -685,6 +704,11 @@ bcm4313_tx_reclaim(struct bcm4313_softc *sc, struct bcm4313_ring *ring,
 	if (ring->r_in == ring->r_out)
 		return;
 	status0 = bcm4313_read_4(sc, ring->r_base + BCM4313_DMA64_STATUS0);
+	if (status0 == 0xffffffff) {
+		sc->sc_flags |= BCM4313_FLAG_DEAD;
+		sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
+		return;
+	}
 	xstate = status0 & BCM4313_D64_XS0_XS_MASK;
 	if (force || xstate == BCM4313_D64_XS0_XS_IDLE ||
 	    xstate == BCM4313_D64_XS0_XS_STOPPED)
@@ -782,8 +806,14 @@ bcm4313_rx_harvest(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 	int gidx, rssi;
 	int i;
 
-	hw = (bcm4313_read_4(sc, ring->r_base + BCM4313_DMA64_STATUS0) &
-	    BCM4313_D64_RS0_CD_MASK) / sizeof(struct bcm4313_dma64desc);
+	hw = bcm4313_read_4(sc, ring->r_base + BCM4313_DMA64_STATUS0);
+	if (hw == 0xffffffff) {
+		sc->sc_flags |= BCM4313_FLAG_DEAD;
+		sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
+		return;
+	}
+	hw = (hw & BCM4313_D64_RS0_CD_MASK) /
+	    sizeof(struct bcm4313_dma64desc);
 	while (ring->r_in != (int)hw) {
 		i = ring->r_in;
 		slot = &ring->r_slots[i];
@@ -800,6 +830,20 @@ bcm4313_rx_harvest(struct bcm4313_softc *sc, struct bcm4313_ring *ring)
 			prxs1 = le16toh(rxh->PhyRxStatus_1);
 			prxs2 = le16toh(rxh->PhyRxStatus_2);
 			prxs0 = le16toh(rxh->PhyRxStatus_0);
+			if (sc->sc_debug >= 3 && sc->sc_rx_samples < 32) {
+				const uint8_t *p = (const uint8_t *)rxh +
+				    BCM4313_HWRXOFF + ((macrxs1 & BCM4313_RXS_PBPRES) ?
+				    2 : 0) + BCM4313_D11_PHY_HDR_LEN;
+				device_printf(sc->sc_dev,
+				    "RX sample %u: chan %u len %u rx1 %#x rx2 %#x "
+				    "prxs0 %#x prxs1 %#x prxs2 %#x "
+				    "fc %#x a1 %02x:%02x:%02x:%02x:%02x:%02x\n",
+				    sc->sc_rx_samples, sc->sc_curchan, rxlen,
+				    macrxs1, macrxs2, prxs0, prxs1, prxs2,
+				    p[0] | (p[1] << 8), p[4], p[5], p[6], p[7],
+				    p[8], p[9]);
+				sc->sc_rx_samples++;
+			}
 			if (rxlen < BCM4313_D11_PHY_HDR_LEN +
 			    IEEE80211_MIN_LEN + BCM4313_FCS_LEN ||
 			    rxlen > ring->r_bufsz - BCM4313_HWRXOFF ||
@@ -943,10 +987,8 @@ bcm4313_txstatus_drain(struct bcm4313_softc *sc)
 			device_printf(sc->sc_dev,
 			    "txstatus: core not responding; MAC stopped, "
 			    "re-up to recover\n");
+			sc->sc_flags |= BCM4313_FLAG_DEAD;
 			sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
-			bcm4313_write_4(sc, BCM4313_D11_MACCONTROL,
-			    bcm4313_read_4(sc, BCM4313_D11_MACCONTROL) &
-			    ~(BCM4313_MCTL_EN_MAC | BCM4313_MCTL_PSM_RUN));
 			return;
 		}
 		if ((s1 & BCM4313_TXS_V) == 0)
@@ -957,6 +999,13 @@ bcm4313_txstatus_drain(struct bcm4313_softc *sc)
 		(void)s2;
 		status = s1 & BCM4313_TXS_STATUS_MASK;
 		fid = (s1 & BCM4313_TXS_FID_MASK) >> BCM4313_TXS_FID_SHIFT;
+		if (sc->sc_debug >= 3 && sc->sc_tx_samples < 32) {
+			device_printf(sc->sc_dev,
+			    "TX sample %u: fid %#x status %#x ack %d\n",
+			    sc->sc_tx_samples, fid, status,
+			    (status & BCM4313_TX_STATUS_ACK_RCV) != 0);
+			sc->sc_tx_samples++;
+		}
 		if ((status & BCM4313_TX_STATUS_INTERMEDIATE) != 0 &&
 		    (status & BCM4313_TX_STATUS_AMPDU) == 0) {
 			/*
@@ -1040,6 +1089,37 @@ bcm4313_plcp_rate(uint8_t rate)	/* rate in 0.5 Mbps units */
 	return (0x0b);		/* 6 Mbps fallback */
 }
 
+static uint8_t
+bcm4313_legacy_phyctl(uint8_t rate)
+{
+	switch (rate) {
+	case 2: return (0x00);
+	case 4: return (0x08);
+	case 11: return (0x10);
+	case 22: return (0x18);
+	case 12: return (0x00);
+	case 18: return (0x02);
+	case 24: return (0x08);
+	case 36: return (0x0a);
+	case 48: return (0x10);
+	case 72: return (0x12);
+	case 96: return (0x19);
+	case 108: return (0x1a);
+	default: return (0x00);
+	}
+}
+
+static uint8_t
+bcm4313_mcs_phyctl3(uint8_t mcs)
+{
+	static const uint8_t table[16] = {
+		0x00, 0x08, 0x0a, 0x10, 0x12, 0x19, 0x1a, 0x1c,
+		0x40, 0x48, 0x4a, 0x50, 0x52, 0x59, 0x5a, 0x5c
+	};
+
+	return (table[min(mcs, nitems(table) - 1)]);
+}
+
 /*
  * Build the 112-byte D11 TX DMA header (struct d11txh).  Field semantics
  * follow brcmsmac brcms_c_sendpkt()/brcms_c_d11hdrs_machdr(); the rate
@@ -1092,9 +1172,6 @@ bcm4313_set_txhdr(struct bcm4313_softc *sc, struct ieee80211_node *ni,
 		/* HT: FT_HT, 1x1, 20MHz, MCS index in MainRates. */
 		phyctl |= BCM4313_TXFTYPE_HT;
 		txh->MainRates = htole16(mcs);
-		txh->PhyTxControlWord_1 = htole16(BCM4313_PHY_TXC1_BW_20MHZ |
-		    (BCM4313_PHY_TXC1_MODE_SISO <<
-		    BCM4313_PHY_TXC1_MODE_SHIFT));
 	} else {
 		/* Legacy: PLCP rate code in MainRates. */
 		txh->MainRates = htole16(bcm4313_plcp_rate(dot11rate));
@@ -1105,12 +1182,25 @@ bcm4313_set_txhdr(struct bcm4313_softc *sc, struct ieee80211_node *ni,
 			 */
 			if (dot11rate != 2 &&
 			    (ni->ni_capinfo & IEEE80211_CAPINFO_SHORT_PREAMBLE) &&
-			    (ic->ic_flags & IEEE80211_F_SHPREAMBLE))
+			    (ic->ic_flags & IEEE80211_F_SHPREAMBLE)) {
 				phyctl |= BCM4313_PHY_TXC_SHORT_HDR;
+				txh->MacTxControlHigh |=
+				    htole16(BCM4313_TXC_PREAMBLE_DATA_FB_SHORT);
+			}
 		} else
 			phyctl |= BCM4313_TXFTYPE_OFDM;
 	}
+	if (is_mcs)
+		txh->PhyTxControlWord_1 = htole16(BCM4313_PHY_TXC1_BW_20MHZ |
+		    (bcm4313_mcs_phyctl3(mcs) << 8));
+	else
+		txh->PhyTxControlWord_1 = htole16(BCM4313_PHY_TXC1_BW_20MHZ |
+		    (bcm4313_legacy_phyctl(dot11rate) << 8));
+	txh->PhyTxControlWord_1_Fbr = txh->PhyTxControlWord_1;
 	txh->PhyTxControlWord = htole16(phyctl);
+	txh->XtraFrameTypes = htole16(
+	    (phyctl & (BCM4313_TXFTYPE_HT | BCM4313_TXFTYPE_OFDM)) |
+	    (sc->sc_curchan << BCM4313_XFTS_CHANNEL_SHIFT));
 }
 
 /*
@@ -1327,8 +1417,8 @@ bcm4313_raw_xmit(struct ieee80211_node *ni, struct mbuf *m,
  * It is uploaded through the OBJADDR microcode window:
  *   objaddr = OBJADDR_AUTO_INC | OBJADDR_UCM_SEL;
  *   for each LE u32: objdata = word;
- * The band-selective and MAC init tweak lists (tags 1 and 2) are then
- * dumped through brcms_c_write_inits() (register writes of 16 or 32 bits).
+ * The MAC and band-selective init lists (tags 2 and 1) are applied only
+ * after the ucode reports its self-suspended handshake.
  * ---------------------------------------------------------------------------
  */
 
@@ -1356,22 +1446,24 @@ static void
 bcm4313_dump_inits(struct bcm4313_softc *sc, const unsigned char *list,
     uint32_t nbytes)
 {
-	const struct bcm4313_d11init *d = (const struct bcm4313_d11init *)list;
-	uint32_t i = 0;
+	uint32_t offset = 0;
 	uint16_t addr, size;
 	uint32_t value;
 
-	while (i + sizeof(struct bcm4313_d11init) <= nbytes) {
-		addr = le16toh(d[i].addr);
-		size = le16toh(d[i].size);
-		value = le32toh(d[i].value);
+	while (offset + sizeof(struct bcm4313_d11init) <= nbytes) {
+		const struct bcm4313_d11init *d =
+		    (const struct bcm4313_d11init *)(list + offset);
+
+		addr = le16toh(d->addr);
+		size = le16toh(d->size);
+		value = le32toh(d->value);
 		if (addr == 0xffff)
 			break;
 		if (size == 2)
 			bcm4313_write_2(sc, addr, (uint16_t)value);
 		else if (size == 4)
 			bcm4313_write_4(sc, addr, value);
-		i++;
+		offset += sizeof(*d);
 	}
 	bcm4313_postwrite_4(sc, BCM4313_D11_MACCONTROL);
 }
@@ -1412,9 +1504,6 @@ bcm4313_ucode_download(struct bcm4313_softc *sc)
 	BCM4313_DPRINTF(sc, "uploading LCN ucode: %u bytes at %#x\n", lcnsz,
 	    off);
 
-	/* reset PSM and select the microcode window */
-	bcm4313_maskset_4(sc, BCM4313_D11_MACCONTROL, ~0,
-	    BCM4313_MCTL_PSM_JMP_0 | BCM4313_MCTL_SHM_EN);
 	bcm4313_write_4(sc, BCM4313_D11_OBJADDR,
 	    BCM4313_OBJADDR_AUTO_INC | BCM4313_OBJADDR_UCM_SEL);
 	(void)bcm4313_read_4(sc, BCM4313_D11_OBJADDR);
@@ -1423,14 +1512,6 @@ bcm4313_ucode_download(struct bcm4313_softc *sc)
 		    le32toh(*(const uint32_t *)(bcm4313_ucode_bin + off +
 		    i * 4)));
 	bcm4313_postwrite_4(sc, BCM4313_D11_OBJADDR);
-
-	/* MAC init tweak lists (band-selective then general). */
-	if (bcm4313_ucode_find_section(BCM4313_D11LCN0BSINITVALS24,
-	    &off, &len) == 0 && off + len <= BCM4313_UCODE_BIN_SZ)
-		bcm4313_dump_inits(sc, bcm4313_ucode_bin + off, len);
-	if (bcm4313_ucode_find_section(BCM4313_D11LCN0INITVALS24,
-	    &off, &len) == 0 && off + len <= BCM4313_UCODE_BIN_SZ)
-		bcm4313_dump_inits(sc, bcm4313_ucode_bin + off, len);
 
 	sc->sc_ucode_loaded = 1;
 	device_printf(sc->sc_dev, "D11 LCN ucode uploaded (%u words)\n",
@@ -1491,26 +1572,24 @@ bcm4313_ucode_download(struct bcm4313_softc *sc)
 static int
 bcm4313_psm_start_locked(struct bcm4313_softc *sc)
 {
-	uint32_t mc, status = 0;
+	uint32_t mc, off, len, status = 0;
 	int i;
 
 	BCM4313_ASSERT_LOCKED(sc);
 
-	/* Drop stale status bits before the PSM is released. */
-	bcm4313_write_4(sc, BCM4313_D11_MACINTSTATUS, 0xffffffff);
+	sc->sc_mac_suspend_depth = 0;
 
 	/* Hold the PSM at 0 with the host register window open. */
 	bcm4313_write_4(sc, BCM4313_D11_MACCONTROL,
 	    BCM4313_MCTL_IHR_EN | BCM4313_MCTL_PSM_JMP_0 | BCM4313_MCTL_WAKE);
 
-	/*
-	 * The core was just reset, so the microcode RAM must be reloaded
-	 * (brcms_b_coreinit() downloads after the reset too).  Forcing the
-	 * flag keeps this correct even when attach() already uploaded once.
-	 */
+	/* The core reset invalidates microcode RAM; force a fresh upload. */
 	sc->sc_ucode_loaded = 0;
 	if (bcm4313_ucode_download(sc) != 0)
 		return (EIO);
+
+	/* Drop stale status bits before the PSM is released. */
+	bcm4313_write_4(sc, BCM4313_D11_MACINTSTATUS, 0xffffffff);
 
 	/* Release the PSM: BSS STA mode, running, woken. */
 	mc = BCM4313_MCTL_IHR_EN | BCM4313_MCTL_GMODE | BCM4313_MCTL_PSM_RUN |
@@ -1529,14 +1608,39 @@ bcm4313_psm_start_locked(struct bcm4313_softc *sc)
 			return (EIO);
 		}
 		if (status & BCM4313_MI_MACSSPNDD) {
-			/*
-			 * The ucode applied its own initvals (register and SHM
-			 * locations) on the way up.  Re-apply the driver's view of
-			 * the SHM window on top, so those word writes cannot clobber
-			 * MAXRXFRM_LEN/SLOT/CHANNEL or the RCM MAC address.
-			 */
+			if (bcm4313_ucode_find_section(BCM4313_D11LCN0INITVALS24,
+			    &off, &len) == 0 && off + len <= BCM4313_UCODE_BIN_SZ)
+				bcm4313_dump_inits(sc, bcm4313_ucode_bin + off, len);
+			if (bcm4313_ucode_find_section(BCM4313_D11LCN0BSINITVALS24,
+			    &off, &len) == 0 && off + len <= BCM4313_UCODE_BIN_SZ)
+				bcm4313_dump_inits(sc, bcm4313_ucode_bin + off, len);
+
+			bcm4313_maskset_4(sc, BCM4313_D11_MACCONTROL,
+			    ~(BCM4313_MCTL_INFRA | BCM4313_MCTL_DISCARD_PMQ |
+			    BCM4313_MCTL_AP), sc->sc_ic.ic_opmode ==
+			    IEEE80211_M_STA ? (BCM4313_MCTL_INFRA |
+			    BCM4313_MCTL_DISCARD_PMQ) : 0);
+			bcm4313_write_4(sc, BCM4313_D11_TSF_CFPPREP,
+			    (0x8000U << 10) << BCM4313_CFPREP_CBI_SHIFT);
+			bcm4313_write_4(sc, BCM4313_D11_TSF_CFPSTART,
+			    0x8000U << 10);
+			bcm4313_write_4(sc, BCM4313_D11_MACINTSTATUS,
+			    BCM4313_MI_GP1);
+
+			/* Re-apply the driver's SHM view after the init lists. */
 			bcm4313_shm_write_2(sc, BCM4313_M_MACHW_VER,
 			    BCM4313_D11_HWREV);
+			bcm4313_shm_write_2(sc, BCM4313_M_MACHW_CAP_L,
+			    (uint16_t)sc->sc_machwcap);
+			bcm4313_shm_write_2(sc, BCM4313_M_MACHW_CAP_H,
+			    (uint16_t)(sc->sc_machwcap >> 16));
+			bcm4313_shm_write_2(sc, BCM4313_M_HOST_FLAGS1,
+			    (sc->sc_board.board_flags & BCM4313_BFL_NOPLLDOWN) ?
+			    BCM4313_MHF1_FORCEFASTCLK : 0);
+			bcm4313_shm_write_2(sc, BCM4313_M_HOST_FLAGS2, 0);
+			bcm4313_shm_write_2(sc, BCM4313_M_HOST_FLAGS3, 0);
+			bcm4313_shm_write_2(sc, BCM4313_M_HOST_FLAGS4, 0);
+			bcm4313_shm_write_2(sc, BCM4313_M_HOST_FLAGS5, 0);
 			bcm4313_shm_write_2(sc, BCM4313_M_MAXRXFRM_LEN, 2346);
 			bcm4313_shm_write_2(sc, BCM4313_M_DOT11_SLOT,
 			    (sc->sc_ic.ic_flags & IEEE80211_F_SHSLOT) ? 9 : 20);
@@ -1575,7 +1679,14 @@ bcm4313_mac_enable(struct bcm4313_softc *sc)
 	struct ieee80211com *ic = &sc->sc_ic;
 	uint32_t mc;
 
+	if (sc->sc_flags & BCM4313_FLAG_DEAD)
+		return;
 	mc = bcm4313_read_4(sc, BCM4313_D11_MACCONTROL);
+	if (!bcm4313_intstatus_valid(mc)) {
+		sc->sc_flags |= BCM4313_FLAG_DEAD;
+		sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
+		return;
+	}
 	if ((mc & BCM4313_MCTL_PSM_RUN) == 0) {
 		if (bcm4313_psm_start_locked(sc) != 0) {
 			BCM4313_DPRINTF(sc, "PSM not running; MAC left off\n");
@@ -1584,13 +1695,17 @@ bcm4313_mac_enable(struct bcm4313_softc *sc)
 		mc = bcm4313_read_4(sc, BCM4313_D11_MACCONTROL);
 	}
 
+	if (sc->sc_mac_suspend_depth > 0 &&
+	    --sc->sc_mac_suspend_depth > 0)
+		return;
+
 	mc |= BCM4313_MCTL_EN_MAC | BCM4313_MCTL_IHR_EN | BCM4313_MCTL_WAKE |
 	    BCM4313_MCTL_GMODE | BCM4313_MCTL_PSM_RUN;
 	mc &= ~BCM4313_MCTL_PSM_JMP_0;
 	if (ic->ic_opmode == IEEE80211_M_STA)
-		mc |= BCM4313_MCTL_INFRA;
+		mc |= BCM4313_MCTL_INFRA | BCM4313_MCTL_DISCARD_PMQ;
 	else
-		mc &= ~BCM4313_MCTL_INFRA;
+		mc &= ~(BCM4313_MCTL_INFRA | BCM4313_MCTL_DISCARD_PMQ);
 	bcm4313_write_4(sc, BCM4313_D11_MACCONTROL, mc);
 
 	/* Clear the ucode's parked indication now that the MAC is enabled. */
@@ -1602,9 +1717,83 @@ bcm4313_mac_disable(struct bcm4313_softc *sc)
 {
 	uint32_t mc;
 
+	sc->sc_mac_suspend_depth = 0;
 	mc = bcm4313_read_4(sc, BCM4313_D11_MACCONTROL);
+	if (!bcm4313_intstatus_valid(mc)) {
+		sc->sc_flags |= BCM4313_FLAG_DEAD;
+		return;
+	}
 	mc &= ~(BCM4313_MCTL_EN_MAC | BCM4313_MCTL_PSM_RUN);
 	bcm4313_write_4(sc, BCM4313_D11_MACCONTROL, mc);
+}
+
+/*
+ * Park the MAC without stopping the microcode (brcms_c_suspend_mac_and_wait).
+ * Channel retuning must not continue unless the ucode acknowledges the park.
+ */
+int
+bcm4313_mac_suspend(struct bcm4313_softc *sc)
+{
+	uint32_t mc, status;
+	int i;
+
+	if (sc->sc_flags & BCM4313_FLAG_DEAD)
+		return (EIO);
+	if (sc->sc_mac_suspend_depth > 0) {
+		sc->sc_mac_suspend_depth++;
+		return (0);
+	}
+
+	mc = bcm4313_read_4(sc, BCM4313_D11_MACCONTROL);
+	if (!bcm4313_intstatus_valid(mc)) {
+		device_printf(sc->sc_dev, "MAC suspend: dead chip\n");
+		sc->sc_flags |= BCM4313_FLAG_DEAD;
+		sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
+		return (EIO);
+	}
+	if ((mc & BCM4313_MCTL_PSM_JMP_0) ||
+	    (mc & BCM4313_MCTL_PSM_RUN) == 0) {
+		device_printf(sc->sc_dev,
+		    "MAC suspend: PSM is not running (maccontrol %#x)\n", mc);
+		sc->sc_flags |= BCM4313_FLAG_DEAD;
+		sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
+		return (EIO);
+	}
+
+	sc->sc_mac_suspend_depth = 1;
+	if ((mc & BCM4313_MCTL_EN_MAC) == 0) {
+		status = bcm4313_read_4(sc, BCM4313_D11_MACINTSTATUS);
+		if (bcm4313_intstatus_valid(status) &&
+		    (status & BCM4313_MI_MACSSPNDD))
+			return (0);
+	}
+
+	mc |= BCM4313_MCTL_WAKE;
+	mc &= ~BCM4313_MCTL_EN_MAC;
+	bcm4313_write_4(sc, BCM4313_D11_MACCONTROL, mc);
+
+	for (i = 0; i < BCM4313_MAX_MAC_SUSPEND; i++) {
+		status = bcm4313_read_4(sc, BCM4313_D11_MACINTSTATUS);
+		if (!bcm4313_intstatus_valid(status)) {
+			device_printf(sc->sc_dev, "MAC suspend: dead chip\n");
+			sc->sc_flags |= BCM4313_FLAG_DEAD;
+			sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
+			return (EIO);
+		}
+		if (status & BCM4313_MI_MACSSPNDD)
+			return (0);
+		DELAY(1);
+	}
+
+	device_printf(sc->sc_dev,
+	    "MAC suspend timed out: psmdebug %#x phydebug %#x psm_brc %#x; "
+	    "MAC stopped, reload the driver to recover\n",
+	    bcm4313_read_4(sc, BCM4313_D11_PSMDEBUG),
+	    bcm4313_read_4(sc, BCM4313_D11_PHYDEBUG),
+	    bcm4313_read_2(sc, BCM4313_D11_PSM_BRC));
+	sc->sc_flags |= BCM4313_FLAG_DEAD;
+	sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
+	return (EIO);
 }
 
 /*
@@ -1641,13 +1830,6 @@ bcm4313_set_macaddr(struct bcm4313_softc *sc, const uint8_t *mac)
 	for (i = 0; i < 6; i += 2)
 		bcm4313_write_2(sc, BCM4313_D11_RCM_MAT_DATA,
 		    mac[i] | (mac[i + 1] << 8));
-	/* Match all 6 bytes. */
-	ctl &= ~BCM4313_RCM_INDEX_MASK;
-	ctl |= BCM4313_RCM_MAC_OFFSET | BCM4313_RCM_INC_MASK_L |
-	    BCM4313_RCM_INC_MASK_H;
-	bcm4313_write_2(sc, BCM4313_D11_RCM_CTL, ctl);
-	for (i = 0; i < 6; i += 2)
-		bcm4313_write_2(sc, BCM4313_D11_RCM_MAT_MASK, 0xffff);
 }
 
 static void
@@ -1703,18 +1885,21 @@ bcm4313_scan_start(struct ieee80211com *ic)
 	sc->sc_flags |= BCM4313_FLAG_SCAN;
 	if ((sc->sc_flags & BCM4313_FLAG_RUNNING) != 0) {
 		/*
-		 * During a scan the MAC must pass beacons from any BSSID
-		 * (not just the RCM-filtered one) up to net80211.  Same
-		 * bit bwn sets in bwn_scan_start() and brcmsmac raises
-		 * for FIF_BCN_PRBRESP_PROMISC (MCTL_BCNS_PROMISC).
+		 * Scan with the same filtering as brcmsmac's FIF_OTHER_BSS |
+		 * FIF_BCN_PRBRESP_PROMISC: unicast probe responses as well as
+		 * beacons from every BSSID must reach net80211.
 		 */
-		bcm4313_maskset_4(sc, BCM4313_D11_MACCONTROL, ~0,
-		    BCM4313_MCTL_BCNS_PROMISC);
+		bcm4313_maskset_4(sc, BCM4313_D11_MACCONTROL,
+		    ~(BCM4313_MCTL_PROMISC | BCM4313_MCTL_KEEPCONTROL |
+		    BCM4313_MCTL_BCNS_PROMISC),
+		    BCM4313_MCTL_PROMISC | BCM4313_MCTL_BCNS_PROMISC);
 	}
 	BCM4313_UNLOCK(sc);
 	BCM4313_DPRINTF(sc, "scan start\n");
 	if (sc->sc_debug > 0)
-		device_printf(sc->sc_dev, "scan start\n");
+		device_printf(sc->sc_dev, "scan start maccontrol %#x "
+		    "promisc %u\n", bcm4313_read_4(sc, BCM4313_D11_MACCONTROL),
+		    ic->ic_promisc);
 }
 
 static void
@@ -1726,7 +1911,24 @@ bcm4313_scan_end(struct ieee80211com *ic)
 	sc->sc_flags &= ~BCM4313_FLAG_SCAN;
 	if ((sc->sc_flags & BCM4313_FLAG_RUNNING) != 0) {
 		bcm4313_maskset_4(sc, BCM4313_D11_MACCONTROL,
-		    ~BCM4313_MCTL_BCNS_PROMISC, 0);
+		    ~(BCM4313_MCTL_PROMISC | BCM4313_MCTL_KEEPCONTROL |
+		    BCM4313_MCTL_BCNS_PROMISC),
+		    ic->ic_promisc > 0 ?
+		    (BCM4313_MCTL_PROMISC | BCM4313_MCTL_KEEPCONTROL) : 0);
+		if (sc->sc_debug >= 3 &&
+		    bcm4313_intstatus_valid(bcm4313_read_4(sc,
+		    BCM4313_D11_MACCONTROL)))
+			device_printf(sc->sc_dev,
+			    "scan RX stats: badfcs %u badplcp %u "
+			    "beaconobss %u dataobss %u mcast %u ctl %u "
+			    "ovfl %u\n",
+			    bcm4313_shm_read_2(sc, 0x0e0 + 0xaa),
+			    bcm4313_shm_read_2(sc, 0x0e0 + 0xac),
+			    bcm4313_shm_read_2(sc, 0x0e0 + 0xd2),
+			    bcm4313_shm_read_2(sc, 0x0e0 + 0xd0),
+			    bcm4313_shm_read_2(sc, 0x0e0 + 0xca),
+			    bcm4313_shm_read_2(sc, 0x0e0 + 0xc2),
+			    bcm4313_shm_read_2(sc, 0x0e0 + 0xda));
 	}
 	BCM4313_UNLOCK(sc);
 	BCM4313_DPRINTF(sc, "scan end\n");
@@ -1747,12 +1949,15 @@ bcm4313_update_promisc(struct ieee80211com *ic)
 	 * MCTL_KEEPCONTROL).  MCTL_KEEPBADFCS stays clear -- bad-FCS frames
 	 * are dropped in the RX path either way.
 	 */
-	if (ic->ic_promisc > 0)
+	if (sc->sc_flags & BCM4313_FLAG_SCAN)
+		bits = BCM4313_MCTL_PROMISC | BCM4313_MCTL_BCNS_PROMISC;
+	else if (ic->ic_promisc > 0)
 		bits = BCM4313_MCTL_PROMISC | BCM4313_MCTL_KEEPCONTROL;
 	else
 		bits = 0;
 	bcm4313_maskset_4(sc, BCM4313_D11_MACCONTROL,
-	    ~(BCM4313_MCTL_PROMISC | BCM4313_MCTL_KEEPCONTROL), bits);
+	    ~(BCM4313_MCTL_PROMISC | BCM4313_MCTL_KEEPCONTROL |
+	    BCM4313_MCTL_BCNS_PROMISC), bits);
 	BCM4313_UNLOCK(sc);
 }
 
@@ -1768,9 +1973,20 @@ bcm4313_set_channel(struct ieee80211com *ic)
 		BCM4313_UNLOCK(sc);
 		return;
 	}
+	if (chan == sc->sc_curchan) {
+		BCM4313_UNLOCK(sc);
+		return;
+	}
 	sc->sc_curchan = chan;
+	bcm4313_trace(sc, "setchan:pre");
+	if (bcm4313_mac_suspend(sc) != 0) {
+		BCM4313_UNLOCK(sc);
+		return;
+	}
 	bcm4313_shm_write_2(sc, BCM4313_M_CURCHANNEL, chan);
 	bcm4313_lcnphy_set_chanspec(sc, chan);
+	bcm4313_mac_enable(sc);
+	bcm4313_trace(sc, "setchan:post");
 	BCM4313_UNLOCK(sc);
 	if (sc->sc_debug >= 2)
 		device_printf(sc->sc_dev, "chan %u\n", chan);
@@ -1910,7 +2126,7 @@ bcm4313_wme_update(struct ieee80211vap *vap,
 		    BCM4313_WME_AC2FIFO(ac) * BCM4313_M_EDCF_QLEN;
 		txop = IEEE80211_TXOP_TO_US(params[ac].wmep_txopLimit);
 		aifs = params[ac].wmep_aifsn & 0x0f;
-		if (ac == IEEE80211_AC_VI && txop == 0 &&
+		if (ac == WME_AC_VI && txop == 0 &&
 		    aifs < 15)
 			aifs++;
 		if (aifs < 1 || aifs > 15)
@@ -1963,8 +2179,15 @@ bcm4313_intr(void *arg)
 	reason &= sc->sc_intr_mask;
 	if (reason == 0)
 		return (FILTER_STRAY);
-	/* Clear by writing back the read value. */
+
+	bcm4313_write_4(sc, BCM4313_D11_MACINTMASK, 0);
 	bcm4313_write_4(sc, BCM4313_D11_MACINTSTATUS, reason);
+	if (reason & BCM4313_MI_DMAINT) {
+		bcm4313_write_4(sc,
+		    BCM4313_D11_DMA_INTSTATUS(BCM4313_RX_FIFO),
+		    BCM4313_DMA_I_RI);
+	}
+	sc->sc_intstatus |= reason;
 	taskqueue_enqueue(sc->sc_tq, &sc->sc_intrtask);
 	return (FILTER_HANDLED);
 }
@@ -1976,24 +2199,25 @@ bcm4313_intrtask(void *arg, int pending)
 	uint32_t reason;
 
 	BCM4313_LOCK(sc);
-	reason = bcm4313_read_4(sc, BCM4313_D11_MACINTSTATUS);
-	if (!bcm4313_intstatus_valid(reason))
-		reason = 0;
-	reason &= sc->sc_intr_mask;
-	if (reason == 0) {
+	reason = sc->sc_intstatus;
+	sc->sc_intstatus = 0;
+	if (reason == 0 || (sc->sc_flags & BCM4313_FLAG_RUNNING) == 0) {
 		BCM4313_UNLOCK(sc);
 		return;
 	}
-	bcm4313_write_4(sc, BCM4313_D11_MACINTSTATUS, reason);
 	if (reason & BCM4313_MI_DMAINT) {
 		bcm4313_tx_reclaim(sc, &sc->sc_tx, 0);
-		bcm4313_rx_harvest(sc, &sc->sc_rx);
-		bcm4313_txstatus_drain(sc);
-		sc->sc_watchdog_timer = 5;
+		if (sc->sc_flags & BCM4313_FLAG_RUNNING) {
+			bcm4313_rx_harvest(sc, &sc->sc_rx);
+			if (sc->sc_flags & BCM4313_FLAG_RUNNING)
+				bcm4313_txstatus_drain(sc);
+			sc->sc_watchdog_timer = 5;
+		}
 	}
 	if (reason & (BCM4313_MI_MACTXERR | BCM4313_MI_PHYTXERR))
 		counter_u64_add(sc->sc_ic.ic_oerrors, 1);
-	if (reason & BCM4313_MI_TFS) {
+	if ((reason & BCM4313_MI_TFS) &&
+	    (sc->sc_flags & BCM4313_FLAG_RUNNING)) {
 		/*
 		 * TX statuses pending in the frmtxstatus register pair: drain
 		 * them so the ucode can post completions for further frames.
@@ -2002,33 +2226,39 @@ bcm4313_intrtask(void *arg, int pending)
 		 * brcms_b_txstatus().)
 		 */
 		bcm4313_txstatus_drain(sc);
-		bcm4313_tx_reclaim(sc, &sc->sc_tx, 0);
+		if (sc->sc_flags & BCM4313_FLAG_RUNNING)
+			bcm4313_tx_reclaim(sc, &sc->sc_tx, 0);
 		sc->sc_watchdog_timer = 5;
 	}
-	if (reason & BCM4313_MI_GP0) {
+	if ((reason & BCM4313_MI_GP0) &&
+	    (sc->sc_flags & BCM4313_FLAG_RUNNING)) {
+		uint32_t mc;
+
 		sc->sc_wdog_fires++;
 		/*
-		 * D11 PSM microcode watchdog; brcmsmac treats MI_GP0 as fatal
-		 * (brcms_fatal_error -> full restart).  Deliberately do NOT feed
-		 * the watchdog callout: a fresh wedge on every tick would grind
-		 * the core with resets (and DMP handshake timeouts) until the
-		 * card is unrecoverable.  Halt the MAC, drop FLAG_RUNNING so
-		 * transmit() rejects frames, and unmask GP0; the next
-		 * init_locked() (via `ifconfig wlan0 up`) restores the mask and
-		 * retries cleanly.
+		 * D11 PSM microcode watchdog; brcmsmac treats MI_GP0 as fatal.
+		 * Halt the MAC and leave recovery to a clean stop/re-up.
 		 */
 		device_printf(sc->sc_dev,
 		    "PSM microcode watchdog fired; MAC stopped, re-up to recover\n");
 		counter_u64_add(sc->sc_ic.ic_oerrors, 1);
-		bcm4313_write_4(sc, BCM4313_D11_MACCONTROL,
-		    bcm4313_read_4(sc, BCM4313_D11_MACCONTROL) &
-		    ~(BCM4313_MCTL_EN_MAC | BCM4313_MCTL_PSM_RUN));
+		mc = bcm4313_read_4(sc, BCM4313_D11_MACCONTROL);
+		if (bcm4313_intstatus_valid(mc)) {
+			bcm4313_write_4(sc, BCM4313_D11_MACCONTROL,
+			    mc & ~(BCM4313_MCTL_EN_MAC | BCM4313_MCTL_PSM_RUN));
+			sc->sc_intr_mask &= ~BCM4313_MI_GP0;
+			bcm4313_write_4(sc, BCM4313_D11_MACINTMASK,
+			    sc->sc_intr_mask);
+		} else {
+			sc->sc_flags |= BCM4313_FLAG_DEAD;
+		}
+		sc->sc_mac_suspend_depth = 0;
 		sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
-		sc->sc_intr_mask &= ~BCM4313_MI_GP0;
-		bcm4313_write_4(sc, BCM4313_D11_MACINTMASK, sc->sc_intr_mask);
 	}
-	if (reason & BCM4313_MI_RFDISABLE) {
+	if ((reason & BCM4313_MI_RFDISABLE) &&
+	    (sc->sc_flags & BCM4313_FLAG_RUNNING)) {
 		bool blocked;
+		uint32_t phydebug;
 
 		/*
 		 * Hardware RF kill switch changed state (edge interrupt,
@@ -2042,25 +2272,51 @@ bcm4313_intrtask(void *arg, int pending)
 		 * (brcmsmac: MI_RFDISABLE -> brcms_rfkill_set_hw_state() ->
 		 * phydebug & PDBG_RFD.)
 		 */
-		blocked = (bcm4313_read_4(sc, BCM4313_D11_PHYDEBUG) &
-		    BCM4313_PDBG_RFD) != 0;
-		if (blocked && !sc->sc_radio_off) {
-			device_printf(sc->sc_dev,
-			    "hardware radio disabled (RF kill switch); MAC "
-			    "stopped -- flip the switch, then re-up the "
-			    "interface (ifconfig wlan down/up)\n");
-			if (sc->sc_flags & BCM4313_FLAG_RUNNING) {
-				bcm4313_write_4(sc, BCM4313_D11_MACCONTROL,
-				    bcm4313_read_4(sc, BCM4313_D11_MACCONTROL) &
-				    ~(BCM4313_MCTL_EN_MAC | BCM4313_MCTL_PSM_RUN));
-				sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
+		phydebug = bcm4313_read_4(sc, BCM4313_D11_PHYDEBUG);
+		if (!bcm4313_intstatus_valid(phydebug)) {
+			sc->sc_flags |= BCM4313_FLAG_DEAD;
+			sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
+		} else {
+			blocked = (phydebug & BCM4313_PDBG_RFD) != 0;
+			if (blocked && !sc->sc_radio_off) {
+				device_printf(sc->sc_dev,
+				    "hardware radio disabled (RF kill switch); MAC "
+				    "stopped -- flip the switch, then re-up the "
+				    "interface (ifconfig wlan down/up)\n");
+				if (sc->sc_flags & BCM4313_FLAG_RUNNING) {
+					uint32_t mc =
+					    bcm4313_read_4(sc,
+					    BCM4313_D11_MACCONTROL);
+
+					if (bcm4313_intstatus_valid(mc))
+						bcm4313_write_4(sc,
+						    BCM4313_D11_MACCONTROL,
+						    mc & ~(BCM4313_MCTL_EN_MAC |
+						    BCM4313_MCTL_PSM_RUN));
+					else
+						sc->sc_flags |=
+						    BCM4313_FLAG_DEAD;
+					sc->sc_mac_suspend_depth = 0;
+					sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
+				}
+			} else if (!blocked && sc->sc_radio_off) {
+				device_printf(sc->sc_dev,
+				    "hardware radio enabled; re-up the interface to "
+				    "reconnect\n");
 			}
-		} else if (!blocked && sc->sc_radio_off) {
-			device_printf(sc->sc_dev,
-			    "hardware radio enabled; re-up the interface to "
-			    "reconnect\n");
+			sc->sc_radio_off = blocked ? 1 : 0;
 		}
-		sc->sc_radio_off = blocked ? 1 : 0;
+	}
+	if (sc->sc_flags & BCM4313_FLAG_RUNNING) {
+		uint32_t mc = bcm4313_read_4(sc, BCM4313_D11_MACCONTROL);
+
+		if (!bcm4313_intstatus_valid(mc)) {
+			sc->sc_flags |= BCM4313_FLAG_DEAD;
+			sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
+		} else if (mc & BCM4313_MCTL_EN_MAC) {
+			bcm4313_write_4(sc, BCM4313_D11_MACINTMASK,
+			    sc->sc_intr_mask);
+		}
 	}
 	BCM4313_UNLOCK(sc);
 }
@@ -2103,10 +2359,8 @@ bcm4313_fifo_errors_locked(struct bcm4313_softc *sc)
 			    "MAC stopped, re-up to recover\n", intstatus,
 			    bcm4313_read_4(sc, BCM4313_D11_MACINTSTATUS),
 			    bcm4313_read_4(sc, BCM4313_D11_MACCONTROL));
+			sc->sc_flags |= BCM4313_FLAG_DEAD;
 			sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
-			bcm4313_write_4(sc, BCM4313_D11_MACCONTROL,
-			    bcm4313_read_4(sc, BCM4313_D11_MACCONTROL) &
-			    ~(BCM4313_MCTL_EN_MAC | BCM4313_MCTL_PSM_RUN));
 			return (-1);
 		}
 		intstatus &= BCM4313_DMA_I_ERRORS;
@@ -2187,34 +2441,44 @@ bcm4313_watchdog(void *arg)
 			device_printf(sc->sc_dev,
 			    "DMA engine error; MAC stopped, re-up to recover\n");
 			mc = bcm4313_read_4(sc, BCM4313_D11_MACCONTROL);
-			mc &= ~(BCM4313_MCTL_EN_MAC | BCM4313_MCTL_PSM_RUN);
-			mc |= BCM4313_MCTL_PSM_JMP_0;
-			bcm4313_write_4(sc, BCM4313_D11_MACCONTROL, mc);
-			sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
-		} else if (--sc->sc_watchdog_timer <= 0) {
-			/*
-			 * No frame and no TX completion for 5s while the
-			 * interface is up.  Recovery faces the same constraint
-			 * as the DMA-fault case above: disarm the engines via a
-			 * full stop (next up) instead of resetting the core
-			 * under a possibly-live MAC.
-			 */
-			sc->sc_wdog_fires++;
-			counter_u64_add(sc->sc_ic.ic_oerrors, 1);
-			device_printf(sc->sc_dev,
-			    "watchdog timeout: MAC stopped, re-up to recover\n");
-			mc = bcm4313_read_4(sc, BCM4313_D11_MACCONTROL);
-			mc &= ~(BCM4313_MCTL_EN_MAC | BCM4313_MCTL_PSM_RUN);
-			mc |= BCM4313_MCTL_PSM_JMP_0;
-			bcm4313_write_4(sc, BCM4313_D11_MACCONTROL, mc);
+			if (bcm4313_intstatus_valid(mc)) {
+				mc &= ~(BCM4313_MCTL_EN_MAC |
+				    BCM4313_MCTL_PSM_RUN);
+				mc |= BCM4313_MCTL_PSM_JMP_0;
+				bcm4313_write_4(sc, BCM4313_D11_MACCONTROL, mc);
+			} else {
+				sc->sc_flags |= BCM4313_FLAG_DEAD;
+			}
+			sc->sc_mac_suspend_depth = 0;
 			sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
 		} else {
-			/*
-			 * Periodic LCN temperature-based TX-power recalibration
-			 * (brcmsmac brcms_b_watchdog() -> wlc_phy_watchdog());
-			 * runs only on healthy ticks.
-			 */
-			bcm4313_lcnphy_watchdog(sc);
+			int pending = sc->sc_tx.r_in != sc->sc_tx.r_out ||
+			    !mbufq_empty(&sc->sc_snd);
+
+			/* Idle scans are valid; only unfinished TX may time out. */
+			if (pending && --sc->sc_watchdog_timer <= 0) {
+				sc->sc_wdog_fires++;
+				counter_u64_add(sc->sc_ic.ic_oerrors, 1);
+				device_printf(sc->sc_dev,
+				    "TX watchdog timeout: MAC stopped, re-up to recover\n");
+				mc = bcm4313_read_4(sc, BCM4313_D11_MACCONTROL);
+				if (bcm4313_intstatus_valid(mc)) {
+					mc &= ~(BCM4313_MCTL_EN_MAC |
+					    BCM4313_MCTL_PSM_RUN);
+					mc |= BCM4313_MCTL_PSM_JMP_0;
+					bcm4313_write_4(sc,
+					    BCM4313_D11_MACCONTROL, mc);
+				} else {
+					sc->sc_flags |= BCM4313_FLAG_DEAD;
+				}
+				sc->sc_mac_suspend_depth = 0;
+				sc->sc_flags &= ~BCM4313_FLAG_RUNNING;
+			} else {
+				if (!pending)
+					sc->sc_watchdog_timer = 5;
+				if ((sc->sc_flags & BCM4313_FLAG_SCAN) == 0)
+					bcm4313_lcnphy_watchdog(sc);
+			}
 		}
 	}
 	callout_schedule(&sc->sc_watchdog_ch, hz);
@@ -2231,6 +2495,7 @@ bcm4313_stop_locked(struct bcm4313_softc *sc)
 {
 	struct ieee80211_node *ni;
 	struct mbuf *m;
+	uint32_t mc;
 
 	BCM4313_ASSERT_LOCKED(sc);
 	/*
@@ -2245,10 +2510,27 @@ bcm4313_stop_locked(struct bcm4313_softc *sc)
 	 * dma_rxreset whenever the core is enabled, RUNNING or not.
 	 */
 	sc->sc_flags &= ~(BCM4313_FLAG_RUNNING | BCM4313_FLAG_SCAN);
+	sc->sc_mac_suspend_depth = 0;
 	callout_stop(&sc->sc_watchdog_ch);
+	sc->sc_intstatus = 0;
+
+	/* Drain the transmit queue even if the core has stopped responding. */
+	while ((m = mbufq_dequeue(&sc->sc_snd)) != NULL) {
+		ni = (struct ieee80211_node *)m->m_pkthdr.rcvif;
+		if (ni != NULL)
+			ieee80211_free_node(ni);
+		m_freem(m);
+	}
+
+	mc = bcm4313_read_4(sc, BCM4313_D11_MACCONTROL);
+	if (!bcm4313_intstatus_valid(mc)) {
+		sc->sc_flags |= BCM4313_FLAG_DEAD;
+		return;
+	}
 
 	/* Mask and clear interrupts; disable the MAC. */
 	bcm4313_write_4(sc, BCM4313_D11_MACINTMASK, 0);
+	bcm4313_write_4(sc, BCM4313_D11_DMA_INTMASK(BCM4313_RX_FIFO), 0);
 	bcm4313_write_4(sc, BCM4313_D11_MACINTSTATUS, 0xffffffff);
 	bcm4313_mac_disable(sc);
 
@@ -2256,24 +2538,25 @@ bcm4313_stop_locked(struct bcm4313_softc *sc)
 	bcm4313_ring_stop(sc, &sc->sc_tx);
 	bcm4313_ring_stop(sc, &sc->sc_rx);
 
-	/* Drain the transmit queue. */
-	while ((m = mbufq_dequeue(&sc->sc_snd)) != NULL) {
-		ni = (struct ieee80211_node *)m->m_pkthdr.rcvif;
-		if (ni != NULL)
-			ieee80211_free_node(ni);
-		m_freem(m);
-	}
+	bcm4313_lcnphy_off(sc);
+	bcm4313_maskset_4(sc, BCM4313_D11_CLK_CTL_ST,
+	    ~BCM4313_CCS_REQ_PHYPLL, 0);
+	bcm4313_postwrite_4(sc, BCM4313_D11_CLK_CTL_ST);
 }
 
 static void
 bcm4313_init_locked(struct bcm4313_softc *sc)
 {
-	struct ieee80211com *ic = &sc->sc_ic;
-	uint32_t ctl;
 	uint16_t ioctl, ioctl_mask;
-	int error;
+	int error, i;
 
 	BCM4313_ASSERT_LOCKED(sc);
+	sc->sc_curchan = 1;
+	if (sc->sc_ic.ic_curchan != NULL)
+		sc->sc_curchan = (uint8_t)ieee80211_chan2ieee(&sc->sc_ic,
+		    sc->sc_ic.ic_curchan);
+	if (sc->sc_curchan < 1 || sc->sc_curchan > 14)
+		sc->sc_curchan = 1;
 	if (sc->sc_flags & BCM4313_FLAG_DEAD) {
 		/*
 		 * Latched dead-core state: the core stopped answering reads
@@ -2308,6 +2591,7 @@ bcm4313_init_locked(struct bcm4313_softc *sc)
 	 */
 	sc->sc_flags &= ~BCM4313_FLAG_DEAD;
 	DELAY(2000);
+	bcm4313_trace(sc, "init:reset");
 	ioctl = BHND_IOCTL_CLK_FORCE;
 	ioctl_mask = BHND_IOCTL_CLK_FORCE | BCM4313_IOCTL_PHYRESET |
 	    BCM4313_IOCTL_PHYCLOCK_ENABLE;
@@ -2324,11 +2608,42 @@ bcm4313_init_locked(struct bcm4313_softc *sc)
 		return;
 	}
 	DELAY(2000);
+	bcm4313_trace(sc, "init:phyclk");
 	/* reset_hw() invalidated our clock request; request it again. */
 	if ((error = bhnd_request_clock(sc->sc_dev, BHND_CLOCK_HT)) != 0) {
 		device_printf(sc->sc_dev, "clock request failed: %d\n", error);
 		return;
 	}
+	bcm4313_trace(sc, "init:ht");
+
+	/*
+	 * 4313 PHY-PLL external-resource request (brcms_b_core_phypll_ctl):
+	 * the core reset cleared clk_ctl_st, so re-request HT + both PLLs
+	 * and wait for HT availability (PHYPLL_WAIT_US) before PHY init.
+	 */
+	bcm4313_write_4(sc, BCM4313_D11_CLK_CTL_ST,
+	    bcm4313_read_4(sc, BCM4313_D11_CLK_CTL_ST) |
+	    BCM4313_CCS_REQ_HT | BCM4313_CCS_REQ_D11PLL |
+	    BCM4313_CCS_REQ_PHYPLL);
+	for (i = 0; i < 10000; i++) {
+		if ((bcm4313_read_4(sc, BCM4313_D11_CLK_CTL_ST) &
+		    (BCM4313_CCS_AVAIL_HT | BCM4313_CCS_AVAIL_D11PLL |
+		    BCM4313_CCS_AVAIL_PHYPLL)) ==
+		    (BCM4313_CCS_AVAIL_HT | BCM4313_CCS_AVAIL_D11PLL |
+		    BCM4313_CCS_AVAIL_PHYPLL))
+			break;
+		DELAY(10);
+	}
+	if (i == 10000)
+		device_printf(sc->sc_dev, "PHY PLL request: HT clock never "
+		    "became available\n");
+	device_printf(sc->sc_dev, "TRACE clk_ctl_st=%08x (req HT|D11PLL|PHYPLL, "
+	    "avail HT=%d D11PLL=%d PHYPLL=%d)\n",
+	    bcm4313_read_4(sc, BCM4313_D11_CLK_CTL_ST),
+	    (bcm4313_read_4(sc, BCM4313_D11_CLK_CTL_ST) & 0x00020000) != 0,
+	    (bcm4313_read_4(sc, BCM4313_D11_CLK_CTL_ST) & 0x01000000) != 0,
+	    (bcm4313_read_4(sc, BCM4313_D11_CLK_CTL_ST) & 0x02000000) != 0);
+	bcm4313_trace(sc, "init:ersrc");
 
 	/*
 	 * Refuse to start while the hardware RF kill switch is engaged
@@ -2349,22 +2664,27 @@ bcm4313_init_locked(struct bcm4313_softc *sc)
 	}
 	sc->sc_radio_off = 0;
 
-	/* Basic MAC control: 2.4GHz (GMODE), MAC disabled. */
-	ctl = bcm4313_read_4(sc, BCM4313_D11_MACCONTROL);
-	ctl &= ~BCM4313_MCTL_EN_MAC;
-	ctl |= BCM4313_MCTL_GMODE;
-	bcm4313_write_4(sc, BCM4313_D11_MACCONTROL, ctl);
-
-	/* Shared-memory configuration. */
-	bcm4313_shm_write_2(sc, BCM4313_M_MACHW_VER, BCM4313_D11_HWREV);
-	bcm4313_shm_write_2(sc, BCM4313_M_MAXRXFRM_LEN, 2346);
-	bcm4313_shm_write_2(sc, BCM4313_M_DOT11_SLOT,
-	    (ic->ic_flags & IEEE80211_F_SHSLOT) ? 9 : 20);
-	bcm4313_shm_write_2(sc, BCM4313_M_CURCHANNEL, sc->sc_curchan);
-	bcm4313_set_macaddr(sc, ic->ic_macaddr);
+	/*
+	 * Start the PSM and apply the D11 initvals (brcms_b_coreinit) BEFORE
+	 * PHY init.  brcmsmac runs wlc_phy_init (radio init + RC calibration)
+	 * in brcms_b_bsinit, after coreinit has the ucode self-suspended and
+	 * the PHY programmed by d11lcn0initvals24.  Calibrating the radio
+	 * against a raw-reset PHY wedges the whole chip (wifi + bluetooth).
+	 * psm_start_locked() re-downloads the ucode + initvals and re-applies
+	 * the SHM window (MACHW_VER/MAXRXFRM/SLOT/CHANNEL/RCM MAC).
+	 */
+	if (bcm4313_psm_start_locked(sc) != 0) {
+		device_printf(sc->sc_dev, "PSM start failed; MAC left off\n");
+		return;
+	}
+	bcm4313_trace(sc, "init:psm");
 
 	/* PHY. */
+	bcm4313_trace(sc, "init:phy-pre");
 	bcm4313_lcnphy_init(sc);
+	bcm4313_trace(sc, "init:phy-post");
+	bcm4313_shm_write_2(sc, BCM4313_M_PHYTYPE, sc->sc_phy_type);
+	bcm4313_shm_write_2(sc, BCM4313_M_PHYVER, sc->sc_phy_rev);
 
 	/* DMA engines. */
 	if (bcm4313_ring_tx_init(sc, &sc->sc_tx) != 0)
@@ -2373,13 +2693,25 @@ bcm4313_init_locked(struct bcm4313_softc *sc)
 		goto fail;
 
 	/* Interrupts. */
+	bcm4313_write_4(sc, BCM4313_D11_INTRCVLAZY,
+	    1U << BCM4313_IRL_FC_SHIFT);
+	bcm4313_write_4(sc, BCM4313_D11_DMA_INTSTATUS(BCM4313_RX_FIFO),
+	    BCM4313_DMA_I_RI);
+	bcm4313_write_4(sc, BCM4313_D11_DMA_INTMASK(BCM4313_RX_FIFO),
+	    BCM4313_DMA_I_RI);
 	sc->sc_intr_mask = BCM4313_MI_DMAINT | BCM4313_MI_TFS |
 	    BCM4313_MI_GP0 | BCM4313_MI_MACTXERR | BCM4313_MI_PHYTXERR |
 	    BCM4313_MI_RFDISABLE;
 	bcm4313_write_4(sc, BCM4313_D11_MACINTMASK, sc->sc_intr_mask);
 
-	/* Start the MAC. */
+	/* Match the ucode's initial suspended state before enabling it. */
+	sc->sc_mac_suspend_depth = 1;
 	bcm4313_mac_enable(sc);
+	if ((sc->sc_flags & BCM4313_FLAG_DEAD) ||
+	    (bcm4313_read_4(sc, BCM4313_D11_MACCONTROL) &
+	    BCM4313_MCTL_EN_MAC) == 0)
+		goto fail;
+	bcm4313_trace(sc, "init:mac");
 	/*
 	 * Enable the ucode's RF-disable debounce timer so MI_RFDISABLE fires
 	 * on a settled switch change.  (brcmsmac brcms_c_init: "enable the RF
@@ -2620,6 +2952,31 @@ bcm4313_attach(device_t dev)
 		goto fail;
 	}
 
+	/*
+	 * Retain the PMU provider so the PHY can program the chipc PLL /
+	 * chipctl / regctl indirect registers (spur-avoidance PLL, analog
+	 * rail config).  Without this handle every bhnd_pmu_* call in the
+	 * PHY layer is a silent no-op and the analog rail is never configured
+	 * for channel changes -- the chip then collapses on the first
+	 * spur-avoidance channel hop.
+	 */
+	sc->sc_pmu = bhnd_retain_provider(dev, BHND_SERVICE_PMU);
+	if (sc->sc_pmu == NULL)
+		device_printf(dev, "warning: no PMU provider; "
+		    "PHY PLL/analog config skipped\n");
+
+	/*
+	 * The raw chipc PMU_CTL PLL_UPD latch (offset 0x600) is not reachable
+	 * through a public bhnd API, and bhnd's own spur-avoidance PLL update
+	 * has no BCM4313 case (returns ENODEV).  Spur avoidance is therefore
+	 * disabled in the PHY layer (see set_chanspec_tweaks) so the MAC clock
+	 * stays consistent with the default PLL bhnd latched at init; without
+	 * this the spur-mode MAC clock mismatches the unlatched PLL and the
+	 * chip collapses on the first spur-avoidance channel hop.
+	 */
+	sc->sc_cc_res = NULL;
+	sc->sc_chipc = NULL;
+
 	/* DMA address translation (64-bit preferred, 32-bit fallback). */
 	if ((error = bhnd_get_dma_translation(dev, BHND_DMA_ADDR_64BIT, 0,
 	    &sc->sc_dmatag, &sc->sc_dma_translation)) != 0) {
@@ -2659,6 +3016,7 @@ bcm4313_attach(device_t dev)
 	}
 	DELAY(1000);
 	phyver = bcm4313_read_2(sc, BCM4313_D11_PHYVER);
+	sc->sc_machwcap = bcm4313_read_4(sc, BCM4313_D11_MACHWCAP);
 	sc->sc_phy_analog = (phyver >> 12) & 0xf;
 	sc->sc_phy_type = (phyver >> 8) & 0xf;
 	sc->sc_phy_rev = phyver & 0xf;
@@ -2764,15 +3122,6 @@ bcm4313_attach(device_t dev)
 			sc->sc_temppwrctrl_capable = true;
 		}
 	}
-
-	/*
-	 * D11 rev 24 / LCN needs its microcode before the MAC can run.  The
-	 * LCN ucode is bundled (bcm4313_ucode.c) and uploaded through the
-	 * OBJADDR microcode window; bail if it cannot be found, since a D11
-	 * core without microcode will not suspend/operate.
-	 */
-	if ((error = bcm4313_ucode_download(sc)) != 0)
-		goto fail;
 
 	/* DMA rings. */
 	if ((error = bcm4313_ring_alloc(sc, &sc->sc_tx,
@@ -2924,6 +3273,16 @@ bcm4313_detach(device_t dev)
 		bus_release_resource(dev, SYS_RES_MEMORY, sc->sc_mem_rid,
 		    sc->sc_mem_res);
 		sc->sc_mem_res = NULL;
+	}
+	/* cc_res is chipc's own mapping; drop the reference, do not release. */
+	sc->sc_cc_res = NULL;
+	if (sc->sc_chipc != NULL) {
+		bhnd_release_provider(dev, sc->sc_chipc, BHND_SERVICE_CHIPC);
+		sc->sc_chipc = NULL;
+	}
+	if (sc->sc_pmu != NULL) {
+		bhnd_release_provider(dev, sc->sc_pmu, BHND_SERVICE_PMU);
+		sc->sc_pmu = NULL;
 	}
 	bhnd_release_pmu(dev);
 	BCM4313_LOCK_DESTROY(sc);

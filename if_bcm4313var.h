@@ -76,18 +76,28 @@ MALLOC_DECLARE(M_BCM4313);
 #define	BCM4313_D11_MACCOMMAND		0x124	/* maccommand */
 #define	BCM4313_D11_MACINTSTATUS	0x128	/* macintstatus */
 #define	BCM4313_D11_MACINTMASK		0x12C	/* macintmask */
+#define	BCM4313_D11_INTRCVLAZY		0x100	/* intrcvlazy[0] */
+#define	BCM4313_IRL_FC_SHIFT		24
 #define	BCM4313_D11_PHYDEBUG		0x158	/* phydebug: PHY status bits */
+#define	BCM4313_D11_PSMDEBUG		0x154
+#define	BCM4313_D11_PSM_BRC		0x490
+#define	BCM4313_D11_MACHWCAP		0x15C
 #define	BCM4313_D11_OBJADDR		0x160	/* objaddr: ucode/shm window */
 #define	BCM4313_D11_OBJDATA		0x164	/* objdata */
 #define	BCM4313_D11_FRMTXSTATUS		0x170	/* frmtxstatus */
 #define	BCM4313_D11_FRMTXSTATUS2	0x174
 #define	BCM4313_D11_TSF_TIMERLOW	0x180	/* tsf_timerlow */
 #define	BCM4313_D11_TSF_TIMERHIGH	0x184
+#define	BCM4313_D11_TSF_CFPPREP	0x188
 #define	BCM4313_D11_TSF_CFPSTART	0x18C
+#define	BCM4313_CFPREP_CBI_SHIFT	6
+#define	BCM4313_D11_IFS_CTL		0x688
+#define	BCM4313_D11_IFS_AIFSN	0x69C
 #define	BCM4313_D11_MACCONTROL1		0x1A0	/* maccontrol1 */
 #define	BCM4313_D11_CLK_CTL_ST		0x1E0	/* clk_ctl_st (HT clock) */
 #define	BCM4313_D11_RADIOADDR		0x3D8	/* radioregaddr (16-bit) */
 #define	BCM4313_D11_RADIODATA		0x3DA	/* radioregdata (16-bit) */
+#define	BCM4313_RADIO_2064_READ_OFF	0x200	/* RADIO_2064_READ_OFF */
 #define	BCM4313_D11_RFDISABLEDLY	0x3DC	/* rfdisabledly: ucode debounce timer */
 #define	BCM4313_D11_PHYVER		0x3E0	/* phyversion (16-bit) */
 #define	BCM4313_D11_PHY4WADDR		0x3F6	/* phy4waddr (32-bit PHYs) */
@@ -108,6 +118,7 @@ MALLOC_DECLARE(M_BCM4313);
 #define	BCM4313_MI_PHYTXERR		(1 << 11)
 #define	BCM4313_MI_PME			(1 << 12)
 #define	BCM4313_MI_GP0			(1 << 13)
+#define	BCM4313_MI_GP1			(1 << 14)
 #define	BCM4313_MI_DMAINT		(1 << 15)
 #define	BCM4313_MI_TXSTOP		(1 << 16)
 #define	BCM4313_MI_PWRUP		(1 << 21)
@@ -128,6 +139,7 @@ MALLOC_DECLARE(M_BCM4313);
 
 /* maccontrol bits (MCTL_*). */
 #define	BCM4313_MCTL_GMODE		(1U << 31)
+#define	BCM4313_MCTL_DISCARD_PMQ	(1 << 30)
 #define	BCM4313_MCTL_WAKE		(1 << 26)
 #define	BCM4313_MCTL_PROMISC		(1 << 24)
 #define	BCM4313_MCTL_KEEPBADFCS		(1 << 23)
@@ -137,10 +149,10 @@ MALLOC_DECLARE(M_BCM4313);
 #define	BCM4313_MCTL_AP			(1 << 18)
 #define	BCM4313_MCTL_INFRA		(1 << 17)
 #define	BCM4313_MCTL_IHR_EN		(1 << 10)
-#define	BCM4313_MCTL_SHM_EN		(1 << 8)
 #define	BCM4313_MCTL_PSM_JMP_0		(1 << 2)
 #define	BCM4313_MCTL_PSM_RUN		(1 << 1)
 #define	BCM4313_MCTL_EN_MAC		(1 << 0)
+#define	BCM4313_MAX_MAC_SUSPEND	83000	/* brcmsmac BRCMS_MAX_MAC_SUSPEND */
 
 /* maccommand bits. */
 #define	BCM4313_MCMD_BCN0VLD		(1 << 0)
@@ -158,10 +170,16 @@ MALLOC_DECLARE(M_BCM4313);
 #define	BCM4313_OBJADDR_WINC		0x01000000
 #define	BCM4313_OBJADDR_RINC		0x02000000
 #define	BCM4313_OBJADDR_AUTO_INC	0x03000000
+#define	BCM4313_S_DOT11_SRC_LMT	6
+#define	BCM4313_S_DOT11_LRC_LMT	7
 
 /* clk_ctl_st bits (HT clock request/avail, 4313). */
 #define	BCM4313_CCS_REQ_HT		0x00000010
+#define	BCM4313_CCS_REQ_D11PLL		0x00000100
+#define	BCM4313_CCS_REQ_PHYPLL		0x00000200
 #define	BCM4313_CCS_AVAIL_HT		0x00020000
+#define	BCM4313_CCS_AVAIL_D11PLL	0x01000000
+#define	BCM4313_CCS_AVAIL_PHYPLL	0x02000000
 
 /*
  * D11 registers used by the LCN-PHY code (offsets from brcmsmac d11.h):
@@ -220,6 +238,19 @@ MALLOC_DECLARE(M_BCM4313);
 #define	BCM4313_M_PHYTYPE		(0x029 * 2)
 #define	BCM4313_M_HOST_FLAGS1		(0x02f * 2)
 #define	BCM4313_M_HOST_FLAGS2		(0x030 * 2)
+#define	BCM4313_M_HOST_FLAGS3		(0x031 * 2)
+#define	BCM4313_M_HOST_FLAGS4		(0x03c * 2)
+#define	BCM4313_M_HOST_FLAGS5		(0x06a * 2)
+#define	BCM4313_M_MBURST_SIZE		(0x040 * 2)
+#define	BCM4313_M_SFRMTXCNTFBRTHSD	(0x022 * 2)
+#define	BCM4313_M_LFRMTXCNTFBRTHSD	(0x023 * 2)
+#define	BCM4313_M_MAX_ANTCNT		(0x02e * 2)
+#define	BCM4313_M_OFDM_OFFSET		(0x027 * 2)
+#define	BCM4313_M_RT_DIRMAP_A		(0x0e0 * 2)
+#define	BCM4313_MHF1_ANTDIV		0x0001
+#define	BCM4313_MHF1_EDCF		0x0100
+#define	BCM4313_MHF1_FORCEFASTCLK	0x0400
+#define	BCM4313_MHF2_HWPWRCTL		0x0080
 #define	BCM4313_M_FIFOSIZE0		(0x04c * 2)
 #define	BCM4313_M_FIFOSIZE1		(0x04d * 2)
 #define	BCM4313_M_FIFOSIZE2		(0x04e * 2)
@@ -238,7 +269,6 @@ MALLOC_DECLARE(M_BCM4313);
 /* net80211 AC index -> d11 TX fifo (brcmsmac wme_ac2fifo). */
 #define	BCM4313_WME_AC2FIFO(ac)		((const uint8_t[]){ 1, 0, 2, 3 }[ac])
 #define	BCM4313_M_BCMC_FID		(0x054 * 2)
-#define	BCM4313_M_EDCF_QINFO		(0x120 * 2)
 #define	BCM4313_M_TXF_CUR_INDEX		(0x018 * 2)
 
 /*
@@ -263,6 +293,7 @@ MALLOC_DECLARE(M_BCM4313);
 /* DMA controller interrupt control (d11.h: intctrlregs[8] at 0x20; one
  * intstatus/intmask pair per DMA engine, indexed by FIFO number). */
 #define	BCM4313_D11_DMA_INTSTATUS(fifo)	(0x20 + (fifo) * 8)
+#define	BCM4313_D11_DMA_INTMASK(fifo)		(0x24 + (fifo) * 8)
 
 /* intctrlregs intstatus error bits (d11.h "intstatus and intmask"). */
 #define	BCM4313_DMA_I_PC		(1 << 10)	/* descriptor error */
@@ -271,6 +302,7 @@ MALLOC_DECLARE(M_BCM4313);
 #define	BCM4313_DMA_I_RU		(1 << 13)	/* rx descriptor underflow */
 #define	BCM4313_DMA_I_RO		(1 << 14)	/* rx fifo overflow */
 #define	BCM4313_DMA_I_XU		(1 << 15)	/* tx fifo underflow */
+#define	BCM4313_DMA_I_RI		(1 << 16)	/* receive interrupt */
 /* Fatal set the watchdog polls (brcmsmac main.h I_ERRORS).  I_RU is left
  * out on purpose: underflow is refilled elsewhere, and a constant
  * underflow would make every watchdog tick fatal. */
@@ -423,6 +455,7 @@ struct bcm4313_d11txh {
 #define	BCM4313_PHY_TXC1_MODE_SISO	0
 
 /* XtraFrameTypes. */
+#define	BCM4313_XFTS_RTS_FT_SHIFT	2
 #define	BCM4313_XFTS_CHANNEL_SHIFT	8
 
 /*
@@ -562,6 +595,7 @@ struct bcm4313_d11rxhdr {
  */
 #define	BCM4313_BFL_FEM			0x00000800	/* FEM 2.4GHz */
 #define	BCM4313_BFL_FEM_BT		0x00400000	/* FEM + Bluetooth */
+#define	BCM4313_BFL_NOPLLDOWN		0x00000020	/* keep chip PLL/oscillator up */
 #define	BCM4313_BFL_EXTLNA		0x00001000	/* external LNA 2.4GHz */
 #define	BCM4313_BFL_NOPA		0x00010000	/* no on-board PA */
 #define	BCM4313_BFL_EXTLNA_5GHz		0x10000000
@@ -642,6 +676,7 @@ struct bcm4313_d11rxhdr {
 #define	BCM4313_TXP_LAST_OFDM			11
 #define	BCM4313_TXP_FIRST_SISO_MCS_20		12
 #define	BCM4313_TXP_LAST_SISO_MCS_20		19
+#define	BCM4313_NUM_TSSI_FRAMES		4
 
 /*
  * LCN-PHY driver state (transcribed from struct brcms_phy_lcnphy and
@@ -722,6 +757,7 @@ struct bcm4313_lcnphy {
 	struct bcm4313_lcnphy_cal_results lcnphy_cal_results;
 
 	uint8_t		lcnphy_current_index;
+	uint16_t	hwpwr_txcur;
 
 	int8_t		tx_power_offset[BCM4313_TXP_NUM_RATES];
 };
@@ -735,6 +771,7 @@ struct bcm4313_phytbl;
 uint16_t bcm4313_read_2(struct bcm4313_softc *, uint16_t);
 void bcm4313_write_2(struct bcm4313_softc *, uint16_t, uint16_t);
 uint32_t bcm4313_read_4(struct bcm4313_softc *, uint16_t);
+void	 bcm4313_trace(struct bcm4313_softc *, const char *); /* TEMP */
 void bcm4313_write_4(struct bcm4313_softc *, uint16_t, uint32_t);
 uint16_t bcm4313_shm_read_2(struct bcm4313_softc *, uint16_t);
 void bcm4313_shm_write_2(struct bcm4313_softc *, uint16_t, uint16_t);
@@ -749,9 +786,11 @@ void bcm4313_lcnphy_write_table(struct bcm4313_softc *, const struct bcm4313_phy
 void bcm4313_lcnphy_read_table(struct bcm4313_softc *, struct bcm4313_phytbl *);
 void bcm4313_mac_enable(struct bcm4313_softc *);
 void bcm4313_mac_disable(struct bcm4313_softc *);
+int bcm4313_mac_suspend(struct bcm4313_softc *);
 
 /* LCN-PHY entry points (if_bcm4313_phy_lcn.c). */
 void bcm4313_lcnphy_init(struct bcm4313_softc *);
+void bcm4313_lcnphy_off(struct bcm4313_softc *);
 void bcm4313_lcnphy_set_chanspec(struct bcm4313_softc *, uint8_t);
 void bcm4313_lcnphy_calib_modes(struct bcm4313_softc *, uint32_t);
 void bcm4313_lcnphy_watchdog(struct bcm4313_softc *);
@@ -947,8 +986,11 @@ struct bcm4313_softc {
 	struct bhnd_resource *sc_cc_res;	/* chipc window (PLL_UPD) */
 
 	/* MAC state */
+	uint32_t		sc_machwcap;
 	uint32_t		sc_intr_mask;
+	uint32_t		sc_intstatus;
 	int			sc_radio_off;	/* hw RF kill engaged (PDBG_RFD), sysctl */
+	int			sc_mac_suspend_depth;
 	int			sc_ucode_loaded;	/* D11 LCN ucode uploaded */
 	char			sc_fw_path[128];	/* (reserved) firmware search dir */
 	uint8_t			sc_bssid[IEEE80211_ADDR_LEN];
@@ -967,6 +1009,8 @@ struct bcm4313_softc {
 	uint32_t		sc_rxpad;	/* frames with QoS pad bytes stripped */
 	uint32_t		sc_rxamsdu;	/* A-MSDU frames dropped */
 	uint32_t		sc_rssiinvalid;	/* frames without a valid PHY rx status */
+	uint32_t		sc_rx_samples;
+	uint32_t		sc_tx_samples;
 	uint32_t		sc_wdog_fires;	/* watchdog resets + PSM watchdog events */
 	uint32_t		sc_dmaerr[8];	/* per-FIFO DMA error counts */
 	uint8_t			sc_dmaerr_fifo;	/* FIFO of the last DMA error */
