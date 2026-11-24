@@ -127,7 +127,7 @@ Makefile                 Out-of-tree kernel-module build
 
 ## License and provenance
 
-The driver glue is dual-licensed **BSD-2-Clause OR GPL-2.0-or-later**. Portions
+The driver glue is dual-licensed **BSD-2-Clause OR GPL-2.0-only**. Portions
 derived from brcmsmac and FreeBSD retain their respective notices, and the
 embedded Broadcom microcode remains under the Broadcom Software License
 Agreement. Read [LICENSE](LICENSE) and

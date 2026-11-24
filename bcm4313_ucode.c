@@ -1,5 +1,5 @@
 /*-
- * SPDX-License-Identifier: BSD-2-Clause OR GPL-2.0-or-later
+ * SPDX-License-Identifier: BSD-2-Clause OR GPL-2.0-only
  *
  * EMBEDDED FIRMWARE (NOT dual-licensable): the byte arrays below are a
  * Broadcom binary, licensed (not sold) under

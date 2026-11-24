@@ -1,7 +1,7 @@
 /*-
- * SPDX-License-Identifier: BSD-2-Clause OR GPL-2.0-or-later
+ * SPDX-License-Identifier: BSD-2-Clause OR GPL-2.0-only
  *
- * Dual-licensed per LICENSE: pick BSD-2-Clause or GPL-2.0-or-later for the
+ * Dual-licensed per LICENSE: pick BSD-2-Clause or GPL-2.0-only for the
  * driver code.  NOTE: this driver embeds ISC-licensed tuning data
  * (bcm4313_lcntab.h, stays ISC) and a Broadcom-owned binary microcode
  * (bcm4313_ucode.c, redistributable only under

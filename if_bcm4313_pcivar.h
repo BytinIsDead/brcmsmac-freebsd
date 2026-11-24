@@ -1,5 +1,5 @@
 /*-
- * SPDX-License-Identifier: BSD-2-Clause OR GPL-2.0-or-later
+ * SPDX-License-Identifier: BSD-2-Clause OR GPL-2.0-only
  *
  * PCI front-end for the BCM4313 (if_bcm4313_pci(4)).
  *

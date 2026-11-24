@@ -1,5 +1,5 @@
 /*-
- * SPDX-License-Identifier: BSD-2-Clause OR GPL-2.0-or-later
+ * SPDX-License-Identifier: BSD-2-Clause OR GPL-2.0-only
  *
  * if_bcm4313_phy_lcn.c -- BCM4313 LCN-PHY layer for the FreeBSD bcm4313
  * driver (if_bcm4313.c).
